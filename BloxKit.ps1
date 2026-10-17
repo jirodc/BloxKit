@@ -12,6 +12,14 @@
 # ==========================================================================
 
 param([switch]$TestOnly, [switch]$Minimized, [switch]$NoRoblox)
+
+$BkVersion = "1.1.0"   # shown in Settings > Help and feedback; bug reports ask for it
+$BkLinks = @{
+    Discord = "https://discord.gg/n24kcvG8zZ"   # the community server (invite never expires); empty hides the "Join the BloxKit Discord" button
+    Repo    = "https://github.com/jirodc/BloxKit"
+    Bug     = "https://github.com/jirodc/BloxKit/issues/new?template=bug_report.yml"
+    Idea    = "https://github.com/jirodc/BloxKit/issues/new?template=feature_request.yml"
+}
 # -NoRoblox is for tools and tests: the app opens with its settings but never opens Chrome or touches
 # Roblox windows, the multi-window lock, hotkeys or the daily start, and runs next to a real copy.
 
@@ -2822,6 +2830,22 @@ Ctrl+Alt+A       anti-AFK on / off</TextBlock>
                   <Button x:Name="ImportBtn" Content="Load backup file" Style="{StaticResource Btn}"/>
                 </WrapPanel>
               </StackPanel>
+            </Border>
+            <Border Style="{StaticResource Card}" Width="420" Margin="0,0,12,12" VerticalAlignment="Top">
+              <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                <Image Source="{DynamicResource Bk.Mascot.Wave1}" Width="76" Height="76" VerticalAlignment="Top" Margin="-6,-4,10,0"/>
+                <StackPanel Grid.Column="1">
+                  <TextBlock Text="Help and feedback" Style="{StaticResource Title}"/>
+                  <TextBlock x:Name="AboutText" Style="{StaticResource Hint}" Margin="0,0,0,10"/>
+                  <WrapPanel>
+                    <Button x:Name="DiscordBtn" Content="Join the BloxKit Discord" Style="{StaticResource Btn}" Background="{StaticResource Accent}" Margin="0,0,8,8"/>
+                    <Button x:Name="BugBtn" Content="Report a bug" Style="{StaticResource Btn}" Margin="0,0,8,8" ToolTip="Opens a short form on GitHub (needs a free GitHub account)"/>
+                    <Button x:Name="IdeaBtn" Content="Suggest a feature" Style="{StaticResource Btn}" Margin="0,0,8,8" ToolTip="Opens a short form on GitHub (needs a free GitHub account)"/>
+                    <Button x:Name="RepoBtn" Content="BloxKit on GitHub" Style="{StaticResource Btn}" Margin="0,0,8,8"/>
+                  </WrapPanel>
+                </StackPanel>
+              </Grid>
             </Border>
             <Border Style="{StaticResource Card}" Width="420" Margin="0,0,12,12" VerticalAlignment="Top">
               <StackPanel>
@@ -6138,6 +6162,15 @@ $ui.StartupBox.Add_Click({ Set-RunAtStartup ([bool]$ui.StartupBox.IsChecked); $u
 
 # Backup
 $ui.ExportBtn.Add_Click({ Export-Backup })
+
+# Help and feedback (Settings). Put the Discord invite in $BkLinks.Discord; the button shows once it's set.
+$ui.AboutText.Text = "BloxKit $BkVersion. Questions and ideas: the BloxKit Discord. Bugs: a short form on GitHub, or #bug-reports on Discord."
+$ui.DiscordBtn.Visibility = $(if ($BkLinks.Discord) { "Visible" } else { "Collapsed" })
+if (-not $BkLinks.Discord) { $ui.AboutText.Text = "BloxKit $BkVersion. Found a bug or have an idea? Send it on GitHub with the buttons below (a short form)." }
+$ui.DiscordBtn.Add_Click({ Start-Process $BkLinks.Discord })
+$ui.BugBtn.Add_Click({ Start-Process $BkLinks.Bug })
+$ui.IdeaBtn.Add_Click({ Start-Process $BkLinks.Idea })
+$ui.RepoBtn.Add_Click({ Start-Process $BkLinks.Repo })
 $ui.ImportBtn.Add_Click({ Import-Backup })
 
 # Window events

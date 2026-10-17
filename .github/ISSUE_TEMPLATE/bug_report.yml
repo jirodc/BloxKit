@@ -1,0 +1,49 @@
+name: Bug report
+description: Something in BloxKit is broken or doesn't work as described.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! One bug per report. Please don't include passwords, cookies, or your Discord webhook link.
+  - type: input
+    id: version
+    attributes:
+      label: BloxKit version
+      description: Settings > Help and feedback shows it.
+      placeholder: "1.0.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: windows
+    attributes:
+      label: Windows
+      options: ["Windows 11", "Windows 10"]
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part?
+      options: ["Opening accounts", "Anti-AFK", "Live screens", "Groups / Schedule", "Kicks and alerts", "Chrome helper / auto-click", "Settings / saving", "Other"]
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to make it happen again
+      placeholder: |
+        1.
+        2.
+        3.
+  - type: textarea
+    id: message
+    attributes:
+      label: Footer or red bar message, screenshots
+      description: The line at the bottom of the app, or the red bar's text (for example "kicked for being idle (278)"). You can paste screenshots here.

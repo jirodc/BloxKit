@@ -427,4 +427,50 @@ $dc.DrawImage((Render (Get-LogoH "dark") @(0, 0, 980, 300) 300 92), (New-Object 
 $dc.Close()
 $bmp = New-Object System.Windows.Media.Imaging.RenderTargetBitmap(1600, 900, 96, 96, [System.Windows.Media.PixelFormats]::Pbgra32); $bmp.Render($sheet)
 Save-Png $bmp (Join-Path $Out "brand-sheet.png")
+# ============================================================ DISCORD KIT ==
+# The community server's icon, banner, invite background and emoji (community\discord\assets).
+$Kit = Join-Path $Root "community\discord\assets"
+New-Item -ItemType Directory -Force (Join-Path $Kit "emoji") | Out-Null
+function New-Text([string]$s, [double]$size, [string]$color, [string]$weight = "SemiBold") {
+    New-Object System.Windows.Media.FormattedText($s, $IC, "LeftToRight", (New-Object System.Windows.Media.Typeface((New-Object System.Windows.Media.FontFamily("Segoe UI Variable Display, Segoe UI")), "Normal", $weight, "Normal")), $size, (New-Brush $color 1), 1.0)
+}
+function Draw-Backdrop($dc, [double]$w, [double]$h) {
+    # Midnight with a soft blue glow on the left and violet on the right; nothing busy.
+    $dc.DrawRectangle((New-Brush $C.Midnight 1), $null, (New-Object System.Windows.Rect(0, 0, $w, $h)))
+    $dc.DrawEllipse((New-Brush (Rad @(0.5, 0.5, 0.5) @(@(0, "#553B82F6"), @(1, "#003B82F6"))) 1), $null, (New-Object System.Windows.Point(($w * 0.28), ($h * 0.55))), ($w * 0.42), ($h * 0.75))
+    $dc.DrawEllipse((New-Brush (Rad @(0.5, 0.5, 0.5) @(@(0, "#448B5CF6"), @(1, "#008B5CF6"))) 1), $null, (New-Object System.Windows.Point(($w * 0.78), ($h * 0.45))), ($w * 0.40), ($h * 0.70))
+}
+function Save-Visual([scriptblock]$draw, [int]$w, [int]$h, [string]$path) {
+    $v = New-Object System.Windows.Media.DrawingVisual; $dc = $v.RenderOpen(); & $draw $dc; $dc.Close()
+    $b = New-Object System.Windows.Media.Imaging.RenderTargetBitmap($w, $h, 96, 96, [System.Windows.Media.PixelFormats]::Pbgra32); $b.Render($v)
+    Save-Png $b $path
+}
+function Draw-Hero($dc, [double]$w, [double]$h) {
+    # Mascot on the left, the name and one line on the right. Kept in the middle 80%, since Discord crops the edges.
+    Draw-Backdrop $dc $w $h
+    $m = $h * 0.64
+    $mx = $w * 0.12; $my = ($h - $m) / 2 + $h * 0.01
+    $dc.DrawImage((Render (Get-Mascot "happy") @(0, 0, 512, 512) ([int]$m) ([int]$m)), (New-Object System.Windows.Rect($mx, $my, $m, $m)))
+    $wm = Get-Glyphs; $ww = $w * 0.36; $wh = $ww * 108 / $wm.Width; $x = $mx + $m + $w * 0.025; $y = $h * 0.38
+    $dc.DrawImage((Render $assets["wordmark"].L $assets["wordmark"].VB ([int]($ww * 2)) ([int]($wh * 2))), (New-Object System.Windows.Rect($x, $y, $ww, $wh)))
+    $dot = "  " + [char]0x00B7 + "  "
+    $dc.DrawText((New-Text ("Launcher" + $dot + "live screens" + $dot + "anti-AFK") ($h * 0.036) "#CBD5E1"), (New-Object System.Windows.Point(($x + 3), ($y + $wh + $h * 0.04))))
+    $dc.DrawText((New-Text "Community, help and feedback" ($h * 0.03) "#94A3B8" "Normal"), (New-Object System.Windows.Point(($x + 3), ($y + $wh + $h * 0.1))))
+}Save-Visual { param($dc) Draw-Hero $dc 960 540 } 960 540 (Join-Path $Kit "banner-960x540.png")
+Save-Visual { param($dc) Draw-Hero $dc 1920 1080 } 1920 1080 (Join-Path $Kit "invite-background-1920x1080.png")
+Save-Visual {
+    # Discord shows the icon as a circle: the head sits well inside it, on Midnight with a little glow.
+    param($dc)
+    Draw-Backdrop $dc 512 512
+    $dc.DrawImage((Render (Get-Emblem "happy") @(74, 16, 366, 366) 340 340), (New-Object System.Windows.Rect(86, 92, 340, 340)))
+} 512 512 (Join-Path $Kit "server-icon-512.png")
+# Emoji: heads read best at chat size; the waving, celebrating and success ones need the whole mascot.
+$emoji = [ordered]@{ bk = @("head", "happy"); bk_ok = @("head", "oval"); bk_think = @("head", "narrow"); bk_wow = @("head", "wide")
+                     bk_sleep = @("head", "closed"); bk_sad = @("head", "worried"); bk_wave = @("body", "wave1"); bk_party = @("body", "celebrate"); bk_check = @("body", "success") }
+foreach ($k in $emoji.Keys) {
+    $e = $emoji[$k]
+    $bmp = $(if ($e[0] -eq "head") { Render (Get-Emblem $e[1]) @(74, 16, 366, 366) 128 128 } else { Render (Get-Mascot $e[1]) @(0, 0, 512, 512) 128 128 })
+    Save-Png $bmp (Join-Path $Kit "emoji\$k.png")
+}
 "Wrote $($assets.Count) assets to $Out, BloxKit.Art.xaml and assets\BloxKit.ico."
+"Wrote the Discord kit to $Kit."

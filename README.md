@@ -10,6 +10,8 @@
   and get told when one is kicked. Windows 10 or 11 and Google Chrome; nothing to install.
 </p>
 
+<p align="center"><a href="https://discord.gg/n24kcvG8zZ"><b>Join the BloxKit Discord</b></a> · <a href="https://github.com/jirodc/BloxKit/issues/new?template=bug_report.yml">Report a bug</a> · <a href="https://github.com/jirodc/BloxKit/issues/new?template=feature_request.yml">Suggest a feature</a></p>
+
 > BloxKit is an independent project. It is not made by, endorsed by, or affiliated with Roblox Corporation.
 > Some games forbid AFK farming in their own rules: check before using it.
 
@@ -300,6 +302,12 @@ powershell -ExecutionPolicy Bypass -File tools\build-brand.ps1
 - `BloxKit.ps1` is the whole app (Windows PowerShell 5.1 + WPF). `-NoRoblox` opens it with its settings but never opens Chrome or touches Roblox, for testing next to a real copy.
 - Checks, no app window needed: `tools\check-settings.ps1`, `check-groups.ps1`, `check-links.ps1`, `check-load.ps1`, `check-schedule.ps1`, `check-status.ps1` (run each with `powershell -ExecutionPolicy Bypass -File`). The Chrome helper: `node tools\check-tabclose.mjs`, and `node tools\check-autojoin.mjs` (against roblox.com).
 - `tools\build-app.ps1` builds BloxKit.exe; `tools\build-brand.ps1` builds the brand art.
+
+## Help and feedback
+
+**[Join the BloxKit Discord](https://discord.gg/n24kcvG8zZ)** for help, news about new versions, and to share ideas.
+
+Found a bug or have an idea? In the app: Settings > **Help and feedback**, or here on GitHub with a short form ([report a bug](https://github.com/jirodc/BloxKit/issues/new?template=bug_report.yml) · [suggest a feature](https://github.com/jirodc/BloxKit/issues/new?template=feature_request.yml)). The same card shows your BloxKit version.
 
 ## License
 
