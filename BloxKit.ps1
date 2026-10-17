@@ -108,7 +108,8 @@ function New-Defaults {
         autoRejoin    = $false
         rejoinSameServer = $true
         autoMuteAlts  = $false
-        trayOnMinimize = $true
+        trayOnMinimize = $false   # minimize to the taskbar like other apps; ticked: hide in the tray instead
+        closeRobloxTray = $true   # close the copy of Roblox that stays in the tray ("--launch-to-tray") after its window closes
         afkMinutes    = 5
         afkMode       = "hidden"
         afkOn         = $false      # the anti-AFK switch, as it was when the app closed
@@ -211,7 +212,7 @@ function ConvertTo-State($s) {
         $n = 0
         if ($null -ne $s.$p -and [int]::TryParse("" + $s.$p, [ref]$n) -and $n -gt 0) { $state.$p = $n }
     }
-    foreach ($p in "autoJoin","rejoinSameServer","alertSound","autoRejoin","autoMuteAlts","trayOnMinimize","afkSkipActive","afkJitter","discCheck","lowPower","ecoAlts","webhookOnDone","schedOn","afkOn","winMax","animations","rbxAuto") {
+    foreach ($p in "autoJoin","rejoinSameServer","alertSound","autoRejoin","autoMuteAlts","trayOnMinimize","afkSkipActive","afkJitter","discCheck","lowPower","ecoAlts","webhookOnDone","schedOn","afkOn","winMax","animations","rbxAuto","closeRobloxTray") {
         if ($null -ne $s.$p) { $state.$p = [bool]$s.$p }
     }
     $secs = @{}
@@ -2789,8 +2790,11 @@ Ctrl+Alt+A       anti-AFK on / off</TextBlock>
                   <TextBlock TextWrapping="Wrap" Text="Animations: the startup intro, page changes and the mascot's reactions (always off when Windows' own animations are off)"/>
                 </CheckBox>
                 <CheckBox x:Name="AutoMuteBox" Margin="0,0,0,8" Content="Mute alts automatically when they open"/>
-                <CheckBox x:Name="TrayBox" Margin="0,0,0,12">
-                  <TextBlock TextWrapping="Wrap" Foreground="{StaticResource Ink}" Text="When I minimize, hide in the tray (by the clock). Anti-AFK keeps running."/>
+                <CheckBox x:Name="TrayBox" Margin="0,0,0,8">
+                  <TextBlock TextWrapping="Wrap" Foreground="{StaticResource Ink}" Text="When I minimize BloxKit, hide it in the tray (by the clock) instead of the taskbar. Anti-AFK keeps running."/>
+                </CheckBox>
+                <CheckBox x:Name="CloseTrayBox" Margin="0,0,0,12">
+                  <TextBlock TextWrapping="Wrap" Foreground="{StaticResource Ink}" Text="Close Roblox's own tray icon (the 'Home' one that stays after you close Roblox). It holds memory and stops Roblox's graphics from being set."/>
                 </CheckBox>
                 <Button x:Name="OpenFolderBtn" Content="Open settings folder" Style="{StaticResource Btn}" HorizontalAlignment="Left"/>
               </StackPanel>
@@ -4258,6 +4262,29 @@ function Save-RobloxGraphicsChoice {
         Show-MascotMoment "Success" "Roblox's graphics are saved."
     } else { Say $r.Msg }
     Update-PerfUi
+}
+$script:TrayNoted = $false
+function Get-RobloxTrayPids([int]$minAgeSec = 15) {
+    # Roblox's own tray copy: started with "--launch-to-tray" when a Roblox window closes, no window,
+    # a "Home" menu by the clock. (Command lines are only read when there's a window-less Roblox.)
+    $old = [DateTime]::Now.AddSeconds(-$minAgeSec)
+    $ids = @(Get-Process -Name "RobloxPlayerBeta" -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -eq [IntPtr]::Zero -and $_.StartTime -lt $old } | ForEach-Object { $_.Id })
+    if (-not $ids.Count) { return @() }
+    @(Get-CimInstance Win32_Process -Filter "Name='RobloxPlayerBeta.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $ids -contains $_.ProcessId -and ("" + $_.CommandLine) -match '--launch-to-tray' } | ForEach-Object { [int]$_.ProcessId })
+}
+function Close-RobloxTray {
+    # Closes Roblox's tray copy: it holds memory, and counts as "Roblox running", so Roblox's
+    # graphics couldn't be set. Never while accounts are opening (a launch might be using it).
+    if ($NoRoblox -or -not $script:State.closeRobloxTray -or $script:QBusy) { return }
+    $now = [DateTime]::Now
+    if (@($script:Ops | Where-Object { -not $_.Hwnd -and -not $_.Cancelled -and ($now - $_.Start).TotalSeconds -lt ($script:State.launchTimeout + 30) }).Count) { return }
+    $n = 0
+    foreach ($id in (Get-RobloxTrayPids)) { try { Stop-Process -Id $id -Force -ErrorAction Stop; $n++ } catch {} }
+    if ($n -and -not $script:TrayNoted) {
+        $script:TrayNoted = $true
+        Say "Closed Roblox's tray icon (Roblox leaves it when its window closes). Settings > Look, sound, tray and files turns this off."
+    }
 }
 function Confirm-RobloxClosed([string]$what) {
     # Roblox's settings can only change while no Roblox runs: every client writes its own copy
@@ -6143,6 +6170,8 @@ $ui.AnimBox.Add_Click({
     Say $(if (-not $script:State.animations) { "Animations are off." } elseif (Test-Motion) { "Animations are on." } else { "Animations are on here, but Windows' own animations are off, so they stay off." })
 })
 $ui.TrayBox.Add_Click({ $script:State.trayOnMinimize = [bool]$ui.TrayBox.IsChecked; Save-Settings })
+$ui.CloseTrayBox.IsChecked = $State.closeRobloxTray
+$ui.CloseTrayBox.Add_Click({ $script:State.closeRobloxTray = [bool]$ui.CloseTrayBox.IsChecked; Save-Settings; if ($script:State.closeRobloxTray) { Close-RobloxTray } })
 $ui.OpenFolderBtn.Add_Click({ Start-Process explorer.exe $AppDir })
 
 # Disconnect check, low power
@@ -6367,6 +6396,7 @@ $Tick.Add_Tick({
         if ($script:SessionDirty) { Save-Session }
     }
     if ($script:TickCount % 10 -eq 5) { Apply-Efficiency -Force }
+    if ($script:TickCount % 10 -eq 6) { Close-RobloxTray }      # Roblox's leftover tray copy (before the graphics check below)
     if ($script:TickCount % 10 -eq 7) { Sync-RobloxGraphics }   # keeps Roblox on the picked graphics while none is running
     if ($script:TickCount % 3 -eq 2 -and $ui.TabSettings.IsSelected -and $win.IsVisible) { Update-PerfUi }   # so Save to Roblox and the line under it follow what is running
     # Your PC right now (Live screens): one ~10 ms reading every 5 s while the window is open.
