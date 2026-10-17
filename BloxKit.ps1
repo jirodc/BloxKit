@@ -1348,6 +1348,293 @@ function Step-TabListener($listener, [scriptblock]$answer) {
     return $n
 }
 
+# ------------------------------------------------------- anti-AFK input --
+# Anti-AFK presses real keys, and Windows sends real keys to whichever window has the focus.
+# So a key or click is only sent after Windows confirms the Roblox window IS the foreground
+# window, checked again right before the press. Asking for the focus proves nothing (Windows
+# may refuse it, or another app may take it back). When it can't be confirmed, nothing is
+# sent at all, and the result says why.
+# Every Windows call goes through a port (BkInputPort), so tools\check-afkinput.ps1 can test
+# this with a pretend Windows; BkInputPort.Windows() is the real one.
+$BkInputSource = @'
+using System;
+using System.Runtime.InteropServices;
+using System.Threading;
+
+// What happened to one key press or click.
+public enum BkSent { Sent = 0, NoWindow = 1, NoFocus = 2, FocusLost = 3, Covered = 4, Failed = 5 }
+
+public sealed class BkInputPort {
+    public Func<IntPtr, bool> IsWindow;
+    public Func<IntPtr> Foreground;
+    public Action<IntPtr> Activate;              // asks Windows to bring it to the front; proves nothing
+    public Action<int> Wait;
+    public Action<int, bool> Key;                // virtual key, down (true) or up
+    public Func<IntPtr, double, double, int[]> SpotOf;   // screen x,y of a spot (fractions of the picture), or null
+    public Func<int[]> Cursor;
+    public Action<int, int> MoveCursor;
+    public Action<bool> Button;                  // left button down (true) or up
+    public Func<int, int, int> PidAt;            // process of the window under a screen point
+    public Func<IntPtr, int> PidOf;
+    public Func<IntPtr, bool> IsVisible;
+    public Func<IntPtr, string> ClassOf;         // the window's class name ("Shell_TrayWnd" is the taskbar)
+
+    [DllImport("user32.dll", EntryPoint = "IsWindow")] static extern bool IsWin(IntPtr h);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int max);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr h);
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll")] static extern bool AttachThreadInput(uint a, uint b, bool attach);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] static extern uint MapVirtualKey(uint code, uint mapType);
+    [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+    [DllImport("user32.dll")] static extern void mouse_event(uint flags, int dx, int dy, uint data, UIntPtr extra);
+    [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr h, ref POINT p);
+    [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
+    [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
+    [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] struct POINT { public int X, Y; }
+
+    static int Pid(IntPtr h) { uint pid; GetWindowThreadProcessId(h, out pid); return (int)pid; }
+
+    public static BkInputPort Windows() {
+        BkInputPort p = new BkInputPort();
+        p.IsWindow = delegate (IntPtr h) { return h != IntPtr.Zero && IsWin(h); };
+        p.Foreground = delegate () { return GetForegroundWindow(); };
+        p.Activate = delegate (IntPtr h) {
+            // Borrow the foreground window's input queue for a moment: Windows then usually lets us switch.
+            IntPtr fg = GetForegroundWindow();
+            uint dummy;
+            uint fgThread = GetWindowThreadProcessId(fg, out dummy);
+            uint me = GetCurrentThreadId();
+            bool attached = false;
+            if (fgThread != 0 && fgThread != me) attached = AttachThreadInput(me, fgThread, true);
+            try {
+                if (IsIconic(h)) ShowWindow(h, 9);
+                BringWindowToTop(h);
+                SetForegroundWindow(h);
+            } finally { if (attached) AttachThreadInput(me, fgThread, false); }
+        };
+        p.Wait = delegate (int ms) { if (ms > 0) Thread.Sleep(ms); };
+        p.Key = delegate (int vk, bool down) {
+            // Scan codes: Roblox reads raw input.
+            byte scan = (byte)MapVirtualKey((uint)vk, 0);
+            keybd_event(0, scan, down ? 0x0008u : (0x0008u | 0x0002u), UIntPtr.Zero);
+        };
+        p.SpotOf = delegate (IntPtr h, double fx, double fy) {
+            RECT r;
+            if (!GetClientRect(h, out r) || r.Right <= 0 || r.Bottom <= 0) return null;
+            POINT pt; pt.X = (int)(r.Right * fx); pt.Y = (int)(r.Bottom * fy);
+            if (!ClientToScreen(h, ref pt)) return null;
+            return new int[] { pt.X, pt.Y };
+        };
+        p.Cursor = delegate () { POINT pt; return GetCursorPos(out pt) ? new int[] { pt.X, pt.Y } : null; };
+        p.MoveCursor = delegate (int x, int y) { SetCursorPos(x, y); };
+        p.Button = delegate (bool down) { mouse_event(down ? 0x0002u : 0x0004u, 0, 0, 0, UIntPtr.Zero); };
+        p.PidAt = delegate (int x, int y) { POINT pt; pt.X = x; pt.Y = y; IntPtr w = WindowFromPoint(pt); return w == IntPtr.Zero ? 0 : Pid(w); };
+        p.PidOf = delegate (IntPtr h) { return Pid(h); };
+        p.IsVisible = delegate (IntPtr h) { return h != IntPtr.Zero && IsWindowVisible(h); };
+        p.ClassOf = delegate (IntPtr h) { System.Text.StringBuilder s = new System.Text.StringBuilder(256); return GetClassName(h, s, 256) > 0 ? s.ToString() : ""; };
+        return p;
+    }
+}
+
+public static class BkInput {
+    public const int FocusTries = 4;
+
+    // True only when h is a window and is the foreground window right now.
+    public static bool Holds(BkInputPort p, IntPtr h) {
+        return h != IntPtr.Zero && p.IsWindow(h) && p.Foreground() == h;
+    }
+
+    // Asks for the focus up to FocusTries times; true only once Windows reports h in front.
+    public static bool Acquire(BkInputPort p, IntPtr h) {
+        for (int i = 0; i < FocusTries; i++) {
+            if (h == IntPtr.Zero || !p.IsWindow(h)) return false;
+            if (p.Foreground() == h) return true;
+            try { p.Activate(h); } catch { }    // a refusal or an error: the check below decides
+            p.Wait(i == 0 ? 150 : 100);
+        }
+        return Holds(p, h);
+    }
+
+    static BkSent NotFocused(BkInputPort p, IntPtr h) {
+        return (h != IntPtr.Zero && p.IsWindow(h)) ? BkSent.NoFocus : BkSent.NoWindow;
+    }
+
+    // One key press into window h, or nothing.
+    public static BkSent Key(BkInputPort p, IntPtr h, int vk, int holdMs) {
+        try {
+            if (h == IntPtr.Zero || !p.IsWindow(h)) return BkSent.NoWindow;
+            if (!Acquire(p, h)) return NotFocused(p, h);
+            if (!Holds(p, h)) return BkSent.FocusLost;   // right before the press
+            p.Key(vk, true);
+            // A pressed key is always let go, even if the focus moves meanwhile: a key-up types
+            // nothing, but a key left down would stay stuck everywhere.
+            try { p.Wait(holdMs); } finally { p.Key(vk, false); }
+            p.Wait(60);
+            return BkSent.Sent;
+        } catch { return BkSent.Failed; }
+    }
+
+    // One left click at a spot of window h (fractions of its picture), or nothing.
+    // The click moves the real pointer, so the spot must also be on this Roblox client:
+    // a window on top of it would get the click instead.
+    public static BkSent Click(BkInputPort p, IntPtr h, double fx, double fy) {
+        try {
+            if (h == IntPtr.Zero || !p.IsWindow(h)) return BkSent.NoWindow;
+            if (!Acquire(p, h)) return NotFocused(p, h);
+            int[] spot = p.SpotOf(h, fx, fy);
+            if (spot == null) return BkSent.NoWindow;
+            int[] old = p.Cursor();
+            p.MoveCursor(spot[0], spot[1]);
+            try {
+                p.Wait(50);
+                if (!Holds(p, h)) return BkSent.FocusLost;   // right before the press
+                if (p.PidAt(spot[0], spot[1]) != p.PidOf(h)) return BkSent.Covered;
+                p.Button(true);
+                try { p.Wait(70); } finally { p.Button(false); }
+                p.Wait(50);
+                return BkSent.Sent;
+            } finally { if (old != null) p.MoveCursor(old[0], old[1]); }
+        } catch { return BkSent.Failed; }
+    }
+}
+'@
+
+function Invoke-AfkInput($port, [IntPtr]$h, [string]$act, [double]$fx = 0.5, [double]$fy = 0.5) {
+    # One anti-AFK action into window $h, through BkInput. -> a BkSent ("Sent" only when every press went in).
+    # Step and zoom are two presses: the second only follows a first that went in, so a skipped
+    # visit never leaves only the "back" step or only the zoom-out.
+    switch ($act) {
+        "walk"  { $r = [BkInput]::Key($port, $h, 0x57, 180); if ($r -eq "Sent") { $r = [BkInput]::Key($port, $h, 0x53, 180) }; return $r }   # W, then S
+        "zoom"  { $r = [BkInput]::Key($port, $h, 0x49, 120); if ($r -eq "Sent") { $r = [BkInput]::Key($port, $h, 0x4F, 120) }; return $r }   # I, then O
+        "click" { return [BkInput]::Click($port, $h, $fx, $fy) }
+        default { return [BkInput]::Key($port, $h, 0x20, 100) }   # Space
+    }
+}
+
+function Get-AfkSkipText($sent, [switch]$Short) {
+    # Why anti-AFK sent nothing to a screen, in words (-Short: for the screen's bottom line).
+    switch ("" + $sent) {
+        "NoWindow"  { return $(if ($Short) { "window closed" } else { "its window closed" }) }
+        "NoFocus"   { return $(if ($Short) { "no focus" } else { "Windows wouldn't bring it to the front" }) }
+        "FocusLost" { return $(if ($Short) { "focus taken" } else { "another window took the focus" }) }
+        "Covered"   { return $(if ($Short) { "spot covered" } else { "something covers its click spot" }) }
+        default     { return $(if ($Short) { "error" } else { "something went wrong" }) }
+    }
+}
+
+# ----- where the keyboard goes back after anti-AFK -----
+# Every visit gives a Roblox window the keyboard for a moment (Roblox only takes keys in its focused
+# window, hidden mode or not), so afterwards the keyboard goes back to the window you were using.
+# That window is remembered by the 1-second timer: a click on the tray icon puts the taskbar, then
+# BloxKit's own hidden tray window, in front before anti-AFK even starts.
+$AfkShellClasses = @("Shell_TrayWnd", "Shell_SecondaryTrayWnd", "NotifyIconOverflowWindow", "TopLevelWindowForOverflowXamlIsland")   # the taskbar and its tray
+
+function New-AfkFocusContext([int]$ownPid, [IntPtr]$mainHwnd, $robloxHandles) {
+    # What the checks below need to know right now: BloxKit's process and main window, and the Roblox screens.
+    @{ OwnPid = $ownPid; Main = $mainHwnd; Roblox = @(@($robloxHandles) | ForEach-Object { [long]$_ }) }
+}
+
+function Test-AfkRobloxWindow($port, [IntPtr]$h, $ctx) {
+    # A Roblox screen, or another window of the same Roblox client.
+    if ($h -eq [IntPtr]::Zero) { return $false }
+    if ($ctx.Roblox -contains $h.ToInt64()) { return $true }
+    $p0 = $port.PidOf.Invoke($h)
+    if ($p0 -le 0) { return $false }
+    foreach ($r in $ctx.Roblox) { if ($port.PidOf.Invoke([IntPtr]$r) -eq $p0) { return $true } }
+    return $false
+}
+
+function Test-AfkUserWindow($port, [IntPtr]$h, $ctx) {
+    # Can the keyboard be given back to this window? A real, visible window that isn't Roblox, the
+    # taskbar or its tray, or one of BloxKit's own other windows (its hidden tray window, its menu,
+    # a dialog). BloxKit's main window is fine.
+    try {
+        if ($h -eq [IntPtr]::Zero -or -not $port.IsWindow.Invoke($h) -or -not $port.IsVisible.Invoke($h)) { return $false }
+        if ($AfkShellClasses -contains ("" + $port.ClassOf.Invoke($h))) { return $false }
+        if ($port.PidOf.Invoke($h) -eq $ctx.OwnPid) { return ($h -eq $ctx.Main) }
+        return -not (Test-AfkRobloxWindow $port $h $ctx)
+    } catch { return $false }
+}
+
+function Get-AfkReturnTarget($port, [IntPtr]$fg, [IntPtr]$last, $ctx) {
+    # The window in front if it's one of yours, otherwise the last one of yours the timer saw,
+    # otherwise none ([IntPtr]::Zero). Never a Roblox window.
+    if (Test-AfkUserWindow $port $fg $ctx) { return $fg }
+    if (Test-AfkUserWindow $port $last $ctx) { return $last }
+    return [IntPtr]::Zero
+}
+
+function New-AfkFocus {
+    # Anti-AFK's memory of the keyboard. Last: the last window of yours the timer saw. Stuck: after a round
+    # the keyboard couldn't be given back, so no round starts while a Roblox window is in front (it would
+    # take the keyboard again and again). Note: the message last shown about it (each is shown once).
+    @{ Last = [IntPtr]::Zero; Stuck = $false; Note = "" }
+}
+
+function Restore-AfkFocus($f, $port, [IntPtr]$back) {
+    # Gives the keyboard back to $back after a round, and checks it really is in front now.
+    # -> @{ Restored; Why = "" | notarget | closed | refused }. When it isn't given back: Stuck.
+    $why = "refused"
+    try {
+        if ($back -eq [IntPtr]::Zero) { $why = "notarget" }
+        elseif (-not $port.IsWindow.Invoke($back)) { $why = "closed" }
+        elseif ([BkInput]::Acquire($port, $back)) { $why = "" }
+        elseif (-not $port.IsWindow.Invoke($back)) { $why = "closed" }
+    } catch { $why = "refused" }
+    if ($why) { $f.Stuck = $true } else { $f.Stuck = $false; $f.Note = "" }
+    return @{ Restored = -not $why; Why = $why }
+}
+
+function Get-AfkPassStart($f, $port, [IntPtr]$fg, $ctx) {
+    # Can an anti-AFK round start now, and where does the keyboard go back afterwards?
+    # -> @{ Ok; Back; Why = "" | stuck | notarget }
+    if ((Test-AfkRobloxWindow $port $fg $ctx) -and $port.IsWindow.Invoke($fg)) {
+        # Roblox in front because the last round couldn't give the keyboard back: not again.
+        if ($f.Stuck) { return @{ Ok = $false; Back = [IntPtr]::Zero; Why = "stuck" } }
+        # You're playing in that Roblox window: it gets the keyboard back, as before.
+        return @{ Ok = $true; Back = $fg; Why = "" }
+    }
+    $t = Get-AfkReturnTarget $port $fg $f.Last $ctx
+    if ($t -eq [IntPtr]::Zero) { return @{ Ok = $false; Back = $t; Why = "notarget" } }
+    return @{ Ok = $true; Back = $t; Why = "" }
+}
+
+function Watch-AfkFocus($f, $port, [IntPtr]$fg, $ctx) {
+    # The 1-second timer: remembers the window of yours in front. Returns $true when that ends a
+    # stuck keyboard (you're back in a window of yours, so anti-AFK can carry on).
+    if (-not (Test-AfkUserWindow $port $fg $ctx)) { return $false }
+    $f.Last = $fg
+    if (-not $f.Stuck) { return $false }
+    $f.Stuck = $false; $f.Note = ""
+    return $true
+}
+
+function Test-AfkRepeatOk($port, [IntPtr]$fg, $first) {
+    # The second hidden visit only follows a first one that gave the keyboard back, and only while
+    # that same window is still in front (you haven't moved on to another one).
+    if (-not $first -or -not $first.Restored -or $first.Back -eq [IntPtr]::Zero) { return $false }
+    return ($fg -eq $first.Back) -and $port.IsWindow.Invoke($first.Back)
+}
+
+function Get-AfkFocusText([string]$why) {
+    # What to tell you when the keyboard couldn't be given back, or a round didn't start.
+    switch ($why) {
+        "notarget" { return "Anti-AFK skipped this round: it doesn't know which window to give the keyboard back to. Click the window you're using, then try again." }
+        "stuck"    { return "Anti-AFK is waiting: a Roblox window still has the keyboard from the last round. Click the window you want to use, and anti-AFK carries on." }
+        "closed"   { return "Couldn't give the keyboard back after anti-AFK: the window you were using closed. Click the window you want to use; anti-AFK waits until you do." }
+        default    { return "Couldn't give the keyboard back after anti-AFK (Windows didn't allow it). Click the window you were using; anti-AFK waits until you do." }
+    }
+}
+
 if ($TestOnly) { return }
 
 # ------------------------------------------------------------------ setup --
@@ -1434,7 +1721,6 @@ public static class RbxCore {
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
     [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
-    [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
     [DllImport("user32.dll")] static extern bool AttachThreadInput(uint a, uint b, bool attach);
     [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vk);
@@ -1532,7 +1818,8 @@ public static class RbxCore {
     // ---- anti-AFK input: keys and clicks ----
     // Roblox reads the keyboard through raw input and only in its focused window, so keys
     // posted to a window in the background (PostMessage) are ignored on most PCs.
-    // What always works is real input to the focused window (FocusKey/FocusClick).
+    // What always works is real input to the focused window, sent only once that focus is
+    // confirmed (BkInput, in "anti-AFK input" above the setup).
     // "Hidden" mode does that out of sight: Stash moves the window just past the right edge
     // of the whole desktop, it gets focus and the key there, and Unstash puts it back (behind
     // everything) once the window you were using has the focus again. The live screens keep
@@ -1548,38 +1835,6 @@ public static class RbxCore {
     }
     public static void Unstash(IntPtr h, RECT r) {
         if (IsWindow(h)) SetWindowPos(h, new IntPtr(1), r.Left, r.Top, 0, 0, 0x0001 | 0x0010);   // back where it was, at the bottom, not activated
-    }
-    [DllImport("user32.dll")] static extern uint MapVirtualKey(uint code, uint mapType);
-    [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr h, ref POINT p);
-    [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
-    [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
-    [DllImport("user32.dll")] static extern void mouse_event(uint flags, int dx, int dy, uint data, UIntPtr extra);
-    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
-
-    public static void FocusKey(IntPtr h, int vk, int holdMs) {
-        if (!IsWindow(h)) return;
-        if (GetForegroundWindow() != h) { ForceFront(h); Thread.Sleep(150); }
-        byte scan = (byte)MapVirtualKey((uint)vk, 0);
-        keybd_event(0, scan, 0x0008, UIntPtr.Zero);
-        Thread.Sleep(holdMs);
-        keybd_event(0, scan, 0x0008 | 0x0002, UIntPtr.Zero);
-        Thread.Sleep(60);
-    }
-    // fx, fy = where to click, as a fraction of the window's picture (0.5, 0.5 = middle)
-    public static void FocusClick(IntPtr h, double fx, double fy) {
-        RECT r;
-        if (!IsWindow(h) || !GetClientRect(h, out r)) return;
-        if (GetForegroundWindow() != h) { ForceFront(h); Thread.Sleep(150); }
-        POINT p; p.X = (int)(r.Right * fx); p.Y = (int)(r.Bottom * fy);
-        ClientToScreen(h, ref p);
-        POINT old; GetCursorPos(out old);
-        SetCursorPos(p.X, p.Y);
-        Thread.Sleep(50);
-        mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero);
-        Thread.Sleep(70);
-        mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);
-        Thread.Sleep(50);
-        SetCursorPos(old.X, old.Y);
     }
     public static int[] ClientSize(IntPtr h) {
         RECT r;
@@ -1715,6 +1970,8 @@ public static class RbxCore {
 '@
 }
 [RbxCore]::SetProcessDPIAware() | Out-Null
+if (-not ("BkInput" -as [type])) { Add-Type -TypeDefinition $BkInputSource }
+$script:InputPort = [BkInputPort]::Windows()   # anti-AFK's keys and clicks go through BkInput only
 
 if (-not ("RbxHotKeys" -as [type])) {
 Add-Type -ReferencedAssemblies System.Windows.Forms -TypeDefinition @'
@@ -5279,6 +5536,8 @@ $script:Waiting = $false
 $script:SecondsLeft = 300
 $IdleNeededMs = 10000   # a visible switch (Quick mode, or a click) waits until you are away this long
 $HiddenIdleMs = 2000    # hidden mode only waits for a short pause in your typing
+$script:AfkFocus = New-AfkFocus   # the window you're using (the keyboard goes back to it), and whether it got stuck in Roblox
+function Get-AfkFocusContext { New-AfkFocusContext $PID $script:PanelHwnd @($script:Wins | ForEach-Object { $_.Handle.ToInt64() }) }
 
 function Get-Targets {
     $fg = [RbxCore]::GetForegroundWindow()
@@ -5296,19 +5555,35 @@ function Get-Targets {
 $AfkActionNames = [ordered]@{ jump = "jump"; walk = "step"; zoom = "zoom"; click = "click" }
 
 function Invoke-AfkAction($w, [string]$act, [bool]$hidden, $back = [IntPtr]::Zero) {
-    # Real input to the focused window (the only kind Roblox takes). In hidden mode the window
-    # gets the focus off-screen; returns where it was so Do-Jumps can put it back afterwards.
-    # A click moves the real mouse pointer, so it can't happen off-screen: it shows the window.
+    # Real input to the focused window (the only kind Roblox takes), and only once Windows confirms
+    # that window has the focus (BkInput); otherwise nothing is pressed. In hidden mode the window
+    # gets the focus off-screen. A click moves the real mouse pointer, so it can't happen
+    # off-screen: it shows the window.
+    # -> @{ Stash = where the window was (Invoke-AfkPass puts it back); Sent = a BkSent }
     $h = $w.Handle
     $stash = $null
     if ($hidden -and $act -ne "click" -and $h -ne $back) { $stash = [RbxCore]::Stash($h) }
-    switch ($act) {
-        "walk" { [RbxCore]::FocusKey($h, 0x57, 180); [RbxCore]::FocusKey($h, 0x53, 180) }
-        "zoom" { [RbxCore]::FocusKey($h, 0x49, 120); [RbxCore]::FocusKey($h, 0x4F, 120) }
-        "click" { [RbxCore]::FocusClick($h, $w.ClickX, $w.ClickY) }
-        default { [RbxCore]::FocusKey($h, 0x20, 100) }
+    $sent = Invoke-AfkInput $script:InputPort $h $act $w.ClickX $w.ClickY
+    return @{ Stash = $stash; Sent = $sent }
+}
+
+function Set-AfkTileResult($r, [string]$t) {
+    # The screen's bottom line: what anti-AFK did last, or that it pressed nothing, and why.
+    $r.W.LastJump = $(if ("$($r.Sent)" -eq "Sent") { "$t $($AfkActionNames[$r.Act])" } else { "$t skipped ($(Get-AfkSkipText $r.Sent -Short))" })
+    Update-TileInfo $r.W
+}
+
+function Get-AfkPassSummary($results) {
+    # One footer line per round: what was pressed, and which screens got nothing (at most 3 named).
+    $sent = @($results | Where-Object { "$($_.Sent)" -eq "Sent" })
+    $skip = @($results | Where-Object { "$($_.Sent)" -ne "Sent" -and "$($_.Sent)" -ne "NoWindow" })   # a window that just closed isn't news
+    $what = ($sent | Group-Object { $AfkActionNames[$_.Act] } | ForEach-Object { "$($_.Count) $($_.Name)" }) -join ", "
+    $msg = "Anti-AFK: $(if ($what) { $what } else { 'nothing pressed' }) ($($script:State.afkMode) mode)."
+    if ($skip.Count) {
+        $names = @($skip | Select-Object -First 3 | ForEach-Object { "$(Label-Of $_.W) ($(Get-AfkSkipText $_.Sent))" }) -join ", "
+        $msg += " Skipped $($skip.Count) screen(s), nothing was pressed there: $names" + $(if ($skip.Count -gt 3) { " and $($skip.Count - 3) more." } else { "." })
     }
-    return $stash
+    return $msg
 }
 
 function Pick-AfkAction {
@@ -5327,47 +5602,69 @@ function Do-Jumps([switch]$Manual) {
     $visible = (-not $hidden) -or @($picks | Where-Object { $_.Act -eq "click" }).Count
     $need = $(if ($visible) { $IdleNeededMs } else { $HiddenIdleMs })
     if (-not $Manual -and [RbxCore]::IdleMs() -lt $need) { return $false }
+    # Where the keyboard goes back afterwards. When there's no such window, or the last round couldn't
+    # give it back and Roblox still has it, this round is skipped: anti-AFK never takes it on a guess.
+    $start = Get-AfkPassStart $script:AfkFocus $script:InputPort ([RbxCore]::GetForegroundWindow()) (Get-AfkFocusContext)
+    if (-not $start.Ok) { Say-AfkFocus $start.Why -Always:$Manual; return $true }
     $t = Get-Date -Format "HH:mm"
-    $done = Invoke-AfkPass $picks $hidden
-    foreach ($p in $picks) { $p.W.LastJump = "$t $($AfkActionNames[$p.Act])"; Update-TileInfo $p.W }
-    if ($hidden) {
+    $pass = Invoke-AfkPass $picks $hidden $start.Back
+    foreach ($r in @($pass.Results)) { Set-AfkTileResult $r $t }
+    if ($hidden -and $pass.Restored) {
         # Measured on Roblox: a hidden visit gets through about 3 times in 4, and when it doesn't,
         # Roblox ignores the whole visit (more presses in it don't help). Visits fail on their
         # own, so a second one 1.5 s later makes it about as sure as Quick switch.
         $script:AfkAgain = @($picks | Where-Object { $_.Act -ne "click" })
+        $script:AfkAgainFirst = $pass
         if ($script:AfkAgain.Count) { $AfkAgainTimer.Start() }
     }
-    $what = ($done | Group-Object | ForEach-Object { "$($_.Count) $($_.Name)" }) -join ", "
-    Say "Anti-AFK: $what ($($script:State.afkMode) mode)."
+    $msg = Get-AfkPassSummary @($pass.Results)
+    if (-not $pass.Restored) { $note = Get-AfkFocusText $pass.Why; $script:AfkFocus.Note = $note; $msg += " $note" }
+    Say $msg
     return $true
 }
 
-function Invoke-AfkPass($picks, [bool]$hidden) {
-    # One visit to each screen. Returns what was done.
-    $back = [RbxCore]::GetForegroundWindow()
-    $done = @(); $stashed = @()
+function Say-AfkFocus([string]$why, [switch]$Always) {
+    # Why the keyboard couldn't be given back, or a round didn't start: said once for each new reason,
+    # or every time when you asked for the round yourself (Do it now, Ctrl+Alt+J, the tray).
+    $m = Get-AfkFocusText $why
+    if ($Always -or $m -ne $script:AfkFocus.Note) { $script:AfkFocus.Note = $m; Say $m }
+}
+
+function Invoke-AfkPass($picks, [bool]$hidden, [IntPtr]$back) {
+    # One visit to each screen, then the keyboard goes back to $back (from Get-AfkPassStart), checked.
+    # -> @{ Results = @{ W; Act; Sent } per screen visited (Sent: a BkSent); Back; Restored; Why }
+    # Not restored: Restore-AfkFocus marks it stuck, so no round starts while Roblox is in front.
+    $out = @(); $stashed = @(); $restore = @{ Restored = $false; Why = "refused" }
     try {
         foreach ($p in $picks) {
             if (-not [RbxCore]::IsWindow($p.W.Handle)) { continue }
             $r = Invoke-AfkAction $p.W $p.Act $hidden $back
-            if ($null -ne $r) { $stashed += @{ H = $p.W.Handle; R = $r } }
-            $done += $AfkActionNames[$p.Act]
+            if ($null -ne $r.Stash) { $stashed += @{ H = $p.W.Handle; R = $r.Stash } }
+            $out += @{ W = $p.W; Act = $p.Act; Sent = $r.Sent }
         }
     } finally {
-        # Focus goes back first, then the windows come back, so none of them ever shows up front.
-        if ([RbxCore]::IsWindow($back)) { [RbxCore]::ForceFront($back) }
+        # The keyboard goes back first (checked, a few tries at most), then the windows come back,
+        # so none of them ever shows up front.
+        $restore = Restore-AfkFocus $script:AfkFocus $script:InputPort $back
         foreach ($s in $stashed) { [RbxCore]::Unstash($s.H, $s.R) }
     }
-    return $done
+    return @{ Results = $out; Back = $back; Restored = $restore.Restored; Why = $restore.Why }
 }
-$script:AfkAgain = @()
+$script:AfkAgain = @(); $script:AfkAgainFirst = $null
 $AfkAgainTimer = New-Object System.Windows.Threading.DispatcherTimer
 $AfkAgainTimer.Interval = [TimeSpan]::FromMilliseconds(1500)
 $AfkAgainTimer.Add_Tick({
-    # The second hidden visit, only if you're still not typing (otherwise the first one has to do).
+    # The second hidden visit: only if you're still not typing, the first visit gave the keyboard back,
+    # and that same window is still in front (otherwise the first one has to do).
     $AfkAgainTimer.Stop()
-    $again = @($script:AfkAgain); $script:AfkAgain = @()
-    if ($again.Count -and $script:State.afkMode -eq "hidden" -and [RbxCore]::IdleMs() -ge 1000) { Invoke-AfkPass $again $true | Out-Null }
+    $again = @($script:AfkAgain); $first = $script:AfkAgainFirst; $script:AfkAgain = @(); $script:AfkAgainFirst = $null
+    if ($again.Count -and $script:State.afkMode -eq "hidden" -and [RbxCore]::IdleMs() -ge 1000 -and (Test-AfkRepeatOk $script:InputPort ([RbxCore]::GetForegroundWindow()) $first)) {
+        # A screen the first visit skipped shows this one's success; a skip here doesn't hide the first one's.
+        $t = Get-Date -Format "HH:mm"
+        $pass = Invoke-AfkPass $again $true $first.Back
+        foreach ($r in @($pass.Results)) { if ("$($r.Sent)" -eq "Sent") { Set-AfkTileResult $r $t } }
+        if (-not $pass.Restored) { Say-AfkFocus $pass.Why }
+    }
 })
 
 function Test-HiddenJump($w) {
@@ -5377,13 +5674,31 @@ function Test-HiddenJump($w) {
     $r = [BkBox]::Show("Watch screen $(Label-Of $w) here on the Live screens tab.`n`nClick OK and don't touch the keyboard for a few seconds. It will do these the hidden way (off-screen, nothing pops up), one by one: $names.", "Test anti-AFK", "OKCancel", "Information")
     if ($r -ne "OK") { return }
     Start-Sleep -Milliseconds 300
+    $start = Get-AfkPassStart $script:AfkFocus $script:InputPort ([RbxCore]::GetForegroundWindow()) (Get-AfkFocusContext)
+    if (-not $start.Ok) { [BkBox]::Show((Get-AfkFocusText $start.Why), "Test anti-AFK", "OK", "Warning") | Out-Null; return }
+    $results = @(); $lost = ""
     foreach ($a in $acts) {
         # Like a real round: a hidden visit, and a second one 1.5 s later (a click shows the window once).
-        Invoke-AfkPass @(@{ W = $w; Act = $a }) $true | Out-Null
-        if ($a -ne "click") { Start-Sleep -Milliseconds 1500; Invoke-AfkPass @(@{ W = $w; Act = $a }) $true | Out-Null }
+        $pass = Invoke-AfkPass @(@{ W = $w; Act = $a }) $true $start.Back; $results += @($pass.Results)
+        if ($pass.Restored -and $a -ne "click") { Start-Sleep -Milliseconds 1500; $pass = Invoke-AfkPass @(@{ W = $w; Act = $a }) $true $start.Back; $results += @($pass.Results) }
+        if (-not $pass.Restored) { $lost = $pass.Why; break }   # the keyboard didn't come back: no more visits
         Start-Sleep -Milliseconds 900
     }
     Start-Sleep -Milliseconds 500
+    if ($lost) {
+        $note = Get-AfkFocusText $lost; $script:AfkFocus.Note = $note
+        [BkBox]::Show($note, "Test anti-AFK", "OK", "Warning") | Out-Null
+        Say $note
+        return
+    }
+    if (-not @($results | Where-Object { "$($_.Sent)" -eq "Sent" }).Count) {
+        # Nothing went in, so "did it react?" can't tell the modes apart. Say why instead.
+        $why = @($results | ForEach-Object { Get-AfkSkipText $_.Sent } | Select-Object -Unique) -join "; "
+        if (-not $why) { $why = "its window closed" }
+        [BkBox]::Show("Nothing was pressed on screen $(Label-Of $w): $why.`n`nBloxKit only presses keys once that Roblox window really has the focus, so nothing went to another app. Close anything that keeps itself in front, then try again.", "Test anti-AFK", "OK", "Warning") | Out-Null
+        Say "Test anti-AFK: nothing was pressed on $(Label-Of $w) ($why)."
+        return
+    }
     $ans = [BkBox]::Show("Did screen $(Label-Of $w) react ($names)?", "Test anti-AFK", "YesNo", "Question")
     if ($ans -eq "Yes") { $ui.ModeHidden.IsChecked = $true; $script:State.afkMode = "hidden"; Say "Hidden mode works on your PC. Anti-AFK will stay out of sight."; Show-MascotMoment "Success" "Hidden anti-AFK works on this PC." }
     else { $ui.ModeQuick.IsChecked = $true; $script:State.afkMode = "quick"; Say "Hidden mode didn't work here, so I switched to Quick switch (it runs only while you're away)." }
@@ -6414,6 +6729,8 @@ $Tick.Add_Tick({
         return
     }
     if ($script:ShowSignal.WaitOne(0)) { Show-App }   # someone started the app again
+    # The window you're using, for anti-AFK to give the keyboard back to; being back in one also ends a stuck keyboard.
+    if (Watch-AfkFocus $script:AfkFocus $script:InputPort ([RbxCore]::GetForegroundWindow()) (Get-AfkFocusContext)) { Say "Anti-AFK carries on: you're back in a window of yours." }
     if ($script:TickCount % 2 -eq 0) { Refresh-Windows; Place-Screens }
     if ($script:PendingRejoin.Count -gt 0) {
         $list = @($script:PendingRejoin); $script:PendingRejoin.Clear()

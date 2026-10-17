@@ -170,6 +170,10 @@ Click spot: on a screen, **...** > **Set click spot**, then click the place on t
 - **Quick switch:** each window comes to the front for a moment. It only runs after you've been away from the PC for 10 seconds.
 - **Click a spot** always works the Quick switch way (it moves the real mouse pointer, which can't click off-screen).
 
+Keys and clicks only go in once Windows confirms that Roblox window really has the focus, checked again right before each press (a click also needs the spot to be on that Roblox window, not under something else). If Windows won't switch, or another app takes the focus, nothing is pressed at all, so it never types into what you're using. The screen's bottom line then says "skipped" and why, and the footer names the screens that were skipped.
+
+Afterwards the keyboard goes back to the window you were using, and BloxKit checks that it really did. Started from the tray icon, that's the window you used before clicking the icon (not the taskbar). If Windows won't give it back, the footer says so and anti-AFK waits until you click a window yourself, so Roblox doesn't keep taking the keyboard. If BloxKit doesn't know any window of yours yet, that round is skipped and the footer says why.
+
 Try it: **...** > **Test anti-AFK** on a screen. If the screen reacts, Hidden mode works on your PC; if not, the app switches to Quick switch.
 
 ## Kicks and crashes
@@ -300,7 +304,7 @@ powershell -ExecutionPolicy Bypass -File tools\build-brand.ps1
 ## For developers
 
 - `BloxKit.ps1` is the whole app (Windows PowerShell 5.1 + WPF). `-NoRoblox` opens it with its settings but never opens Chrome or touches Roblox, for testing next to a real copy.
-- Checks, no app window needed: `tools\check-settings.ps1`, `check-groups.ps1`, `check-links.ps1`, `check-load.ps1`, `check-schedule.ps1`, `check-status.ps1` (run each with `powershell -ExecutionPolicy Bypass -File`). The Chrome helper: `node tools\check-tabclose.mjs`, and `node tools\check-autojoin.mjs` (against roblox.com).
+- Checks, no app window needed: `tools\check-settings.ps1`, `check-groups.ps1`, `check-links.ps1`, `check-load.ps1`, `check-schedule.ps1`, `check-status.ps1`, `check-afkinput.ps1` (run each with `powershell -ExecutionPolicy Bypass -File`). `check-afkinput.ps1` checks, with a pretend Windows, that anti-AFK only presses into a confirmed focused window and gives the keyboard back. The Chrome helper: `node tools\check-tabclose.mjs`, and `node tools\check-autojoin.mjs` (against roblox.com).
 - `tools\build-app.ps1` builds BloxKit.exe; `tools\build-brand.ps1` builds the brand art.
 
 ## Help and feedback
