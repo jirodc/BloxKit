@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Roblox Manager Auto-Join Helper",
+  "version": "2.2",
+  "description": "Starts the game for you, and closes the launch tab once Roblox Manager confirms it worked. Only on pages opened by Roblox Manager.",
+  "minimum_chrome_version": "116",
+  "background": { "service_worker": "background.js" },
+  "permissions": ["storage", "alarms"],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "https://www.roblox.com/*",
+    "https://web.roblox.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.roblox.com/*",
+        "https://web.roblox.com/*"
+      ],
+      "js": ["autojoin.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://www.roblox.com/*",
+        "https://web.roblox.com/*"
+      ],
+      "js": ["tabclose.js"],
+      "run_at": "document_start"
+    }
+  ]
+}
