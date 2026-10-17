@@ -108,10 +108,10 @@ try {
     Check "the window's size is kept" ($l.winWidth -eq 1500 -and $l.winHeight -eq 900 -and $l.winMax)
     Write-Text $g '{ "accounts": [], "rbxQuality": 42, "rbxFps": 75, "afkOff": [ "", "Alt1", "alt1" ] }'
     $l = (Read-SettingsFile $g).State
-    Check "bad graphics picks mean 'not picked'; AFK ticks are cleaned up" ($l.rbxQuality -eq 0 -and $l.rbxFps -eq 0 -and (@($l.afkOff) -join ",") -eq "alt1")
+    Check "bad graphics picks fall back to the lowest (quality 1, 30 FPS); AFK ticks are cleaned up" ($l.rbxQuality -eq 1 -and $l.rbxFps -eq 30 -and (@($l.afkOff) -join ",") -eq "alt1")
     Write-Text $g '{ "accounts": [] }'
     $l = (Read-SettingsFile $g).State
-    Check "older settings files: anti-AFK off, nothing picked, normal window" (-not $l.afkOn -and $l.rbxQuality -eq 0 -and @($l.afkOff).Count -eq 0 -and $l.winWidth -eq 0)
+    Check "older settings files: anti-AFK off, the lowest graphics (Low resource), normal window" (-not $l.afkOn -and $l.rbxQuality -eq 1 -and $l.rbxFps -eq 30 -and $l.rbxAuto -and $l.lowPower -and $l.launchSettle -eq 12 -and @($l.afkOff).Count -eq 0 -and $l.winWidth -eq 0)
 
     # ---- sound follows the account; screens follow the account list ----
     $st = New-Defaults

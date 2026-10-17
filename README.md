@@ -211,9 +211,9 @@ Live screens > **Your PC right now**: clients open, how busy the processor and e
 
 Settings > Performance:
 
-- **Preset:** Low resource (alts small + efficiency mode, 12 s between launches, Roblox quality 1 at 30 FPS) or Balanced (efficiency mode, 8 s, quality 4 at 60 FPS). "Custom" means your own mix.
+- **Preset:** Low resource (alts small + efficiency mode, 12 s between launches, Roblox quality 1 at 30 FPS; what a new install starts with) or Balanced (efficiency mode, 8 s, quality 4 at 60 FPS). "Custom" means your own mix.
 - **Most Roblox windows at once:** extra launches aren't opened; their status says why. A schedule treats them like accounts that didn't load.
-- **Roblox graphics quality / frame rate cap:** Roblox's own settings (in Roblox: Esc > Settings), one file that every client reads when it starts. **Save to Roblox** writes them (Roblox must be closed); the old file is kept, **Undo** puts it back. Your main uses the same settings.
+- **Roblox graphics quality / frame rate cap:** Roblox's own settings (in Roblox: Esc > Settings), one file that every client reads when it starts, so they can only change while no Roblox runs. With **Keep Roblox on these** (on by default), BloxKit puts your picks into Roblox by itself whenever no Roblox is running, and before it opens accounts. **Save to Roblox** does it right away: if Roblox is running, it offers to close all of it first (background leftovers too). The old file is kept, **Undo** puts it back. Your main uses the same settings.
 
 Measuring a lagging PC: while it lags, run
 

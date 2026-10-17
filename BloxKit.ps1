@@ -13,7 +13,7 @@
 
 param([switch]$TestOnly, [switch]$Minimized, [switch]$NoRoblox)
 
-$BkVersion = "1.1.1"   # shown in Settings > Help and feedback; bug reports ask for it
+$BkVersion = "1.2.0"   # shown in Settings > Help and feedback; bug reports ask for it
 $BkLinks = @{
     Discord = "https://discord.gg/n24kcvG8zZ"   # the community server (invite never expires); empty hides the "Join the BloxKit Discord" button
     Repo    = "https://github.com/jirodc/BloxKit"
@@ -95,13 +95,14 @@ function New-Defaults {
         favorites     = @()
         groups        = @()
         launchTimeout = 90      # seconds to wait for a Roblox window
-        launchSettle  = 8       # extra seconds after it appears, before the next one
+        launchSettle  = 12      # extra seconds after it appears, before the next one (the Low resource preset is the default)
         mainSettle    = 20      # "Start everything": time for the main to get into the game
         tabCloseWhen  = "off"   # close the Chrome tab a launch came from: off | window (Roblox window opened) | connected (in a game)
         spread        = 0       # game links: 0 = Roblox picks the server; N = spread out, up to N of your accounts per server
         maxClients    = 0       # most Roblox windows open at once (0 = no limit)
-        rbxQuality    = 0       # Roblox graphics picked in Settings > Performance, 1-10 (0 = not picked: show Roblox's own)
-        rbxFps        = 0       # 30 | 60 | 144 | 240 | -1 (Roblox default); 0 = not picked
+        rbxQuality    = 1       # Roblox graphics picked in Settings > Performance, 1-10 (0 = not picked: show Roblox's own); lowest by default
+        rbxFps        = 30      # 30 | 60 | 144 | 240 | -1 (Roblox default); 0 = not picked
+        rbxAuto       = $true   # keep Roblox on those: BloxKit writes them into Roblox's file itself whenever no Roblox is running
         alertSound    = $true
         autoRejoin    = $false
         rejoinSameServer = $true
@@ -118,7 +119,7 @@ function New-Defaults {
         afkActions    = @("jump")   # any of: jump, walk, zoom, click (one is picked at random each time)
         clickSpots    = @{}         # account nick -> "x,y" (fractions of the window) for the "click" action
         discCheck     = $true
-        lowPower      = $false
+        lowPower      = $true       # alt windows small (part of the Low resource preset)
         ecoAlts       = $true       # Windows efficiency mode for every window except the main
         webhook       = ""
         webhookOnDone = $false
@@ -209,7 +210,7 @@ function ConvertTo-State($s) {
         $n = 0
         if ($null -ne $s.$p -and [int]::TryParse("" + $s.$p, [ref]$n) -and $n -gt 0) { $state.$p = $n }
     }
-    foreach ($p in "autoJoin","rejoinSameServer","alertSound","autoRejoin","autoMuteAlts","trayOnMinimize","afkSkipActive","afkJitter","discCheck","lowPower","ecoAlts","webhookOnDone","schedOn","afkOn","winMax","animations") {
+    foreach ($p in "autoJoin","rejoinSameServer","alertSound","autoRejoin","autoMuteAlts","trayOnMinimize","afkSkipActive","afkJitter","discCheck","lowPower","ecoAlts","webhookOnDone","schedOn","afkOn","winMax","animations","rbxAuto") {
         if ($null -ne $s.$p) { $state.$p = [bool]$s.$p }
     }
     $secs = @{}
@@ -2742,9 +2743,12 @@ Ctrl+Alt+A       anti-AFK on / off</TextBlock>
                 <TextBlock x:Name="RbxNowText" Style="{StaticResource Hint}"/>
                 <WrapPanel Margin="0,8,0,0">
                   <Button x:Name="RbxApplyBtn" Content="Save to Roblox" Style="{StaticResource Btn}" Background="{StaticResource Accent}" Margin="0,0,8,0"/>
-                  <Button x:Name="RbxUndoBtn" Content="Undo" Style="{StaticResource Btn}" ToolTip="Put back Roblox's settings file from before the last 'Save to Roblox'"/>
+                  <Button x:Name="RbxUndoBtn" Content="Undo" Style="{StaticResource Btn}" ToolTip="Put back Roblox's settings file from before the last change"/>
                 </WrapPanel>
-                <TextBlock Style="{StaticResource Hint}" Margin="0,8,0,0" Text="These are Roblox's own settings (in Roblox: Esc &gt; Settings), in one file every client reads when it starts. Close all Roblox windows to change them. The old file is kept for Undo."/>
+                <CheckBox x:Name="RbxAutoBox" Margin="0,10,0,0">
+                  <TextBlock TextWrapping="Wrap" Text="Keep Roblox on these: BloxKit puts them into Roblox by itself whenever no Roblox is running (changes made in a game are put back)"/>
+                </CheckBox>
+                <TextBlock Style="{StaticResource Hint}" Margin="0,8,0,0" Text="These are Roblox's own settings (in Roblox: Esc &gt; Settings), in one file every client reads when it starts, so they can only change while no Roblox runs. Save to Roblox offers to close it first. The old file is kept for Undo."/>
               </StackPanel>
             </Border>
             <Border Style="{StaticResource Card}" Width="852" Margin="0,0,12,12" VerticalAlignment="Top">
@@ -4245,34 +4249,70 @@ function Format-RobloxGraphics($g) {
 function Save-RobloxGraphicsChoice {
     $q = [int]$ui.RbxQualityBox.SelectedItem.Tag; $fps = [int]$ui.RbxFpsBox.SelectedItem.Tag
     if (-not $script:CanWriteRoblox) { Say "(test mode) Roblox's settings file isn't changed."; return }
-    if ((Get-RobloxRunningCount) -gt 0) {
-        [BkBox]::Show("Close all Roblox windows first.`n`nEvery client reads these settings when it starts and saves its own copy when it closes, so a change now would be overwritten.", "Roblox graphics", "OK", "Information") | Out-Null
-        return
-    }
+    if (-not (Confirm-RobloxClosed "save these")) { Update-PerfUi; return }
+    $r = Write-RobloxGraphics $q $fps
+    if ($r.Ok) {
+        Say "Saved to Roblox: $(Format-RobloxGraphics (Get-CurrentRobloxGraphics)). Open a client and check Esc > Settings shows it."
+        Show-MascotMoment "Success" "Roblox's graphics are saved."
+    } else { Say $r.Msg }
+    Update-PerfUi
+}
+function Confirm-RobloxClosed([string]$what) {
+    # Roblox's settings can only change while no Roblox runs: every client writes its own copy
+    # when it closes. Offers to close all of it, background leftovers included. $true = all closed.
+    $n = Get-RobloxRunningCount
+    if ($n -eq 0) { return $true }
+    $r = [BkBox]::Show("Roblox is running ($n program(s), counting background ones). Every client writes its own copy of these settings when it closes, so it all has to close first.`n`nClose all Roblox now and $what?", "Roblox graphics", "YesNo", "Question")
+    if ($r -ne "Yes") { return $false }
+    foreach ($w in $script:Wins) { [void]$script:ExpectedClose.Add($w.Handle.ToInt64()) }   # no "kicked" alerts for these
+    Get-Process -Name "RobloxPlayerBeta" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    for ($i = 0; $i -lt 40 -and (Get-RobloxRunningCount) -gt 0; $i++) { Start-Sleep -Milliseconds 250 }
+    if ((Get-RobloxRunningCount) -gt 0) { Say "Some Roblox didn't close. End RobloxPlayerBeta.exe in Task Manager, then try again."; return $false }
+    return $true
+}
+function Write-RobloxGraphics([int]$q, [int]$fps) {
+    # Writes quality and frame rate into Roblox's settings file (only while no Roblox runs).
+    # The old file is kept for Undo; only the last 5 copies are kept.
     $f = Get-RobloxSettingsFile
-    if (-not $f) { Say "Couldn't find Roblox's settings file in $RobloxDataDir. Open Roblox once, then try again."; return }
-    $old = [IO.File]::ReadAllText($f.FullName)
-    $new = Set-RobloxGraphics $old $q $fps
-    if (-not $new) { Say "Roblox's settings file doesn't have the graphics settings this app knows. Nothing was changed."; return }
+    if (-not $f) { return @{ Ok = $false; Msg = "Couldn't find Roblox's settings file in $RobloxDataDir. Open Roblox once, then try again." } }
+    $new = Set-RobloxGraphics ([IO.File]::ReadAllText($f.FullName)) $q $fps
+    if (-not $new) { return @{ Ok = $false; Msg = "Roblox's settings file doesn't have the graphics settings this app knows. Nothing was changed." } }
     $keep = Join-Path $AppDir ("roblox-settings-before-" + (Get-Date -Format "yyyyMMdd-HHmmss") + "__" + $f.Name)   # remembers which file it came from
     try {
         Copy-Item -LiteralPath $f.FullName $keep -ErrorAction Stop
         $tmp = "$($f.FullName).rml-tmp"
         [IO.File]::WriteAllText($tmp, $new, (New-Object Text.UTF8Encoding $false))
         [IO.File]::Replace($tmp, $f.FullName, [NullString]::Value)   # $null would arrive as "" (an invalid path)
-        Say "Saved to Roblox: $(Format-RobloxGraphics (Get-CurrentRobloxGraphics)). Open a client and check Esc > Settings shows it."
-        Show-MascotMoment "Success" "Roblox's graphics are saved."
+        Get-ChildItem $AppDir -Filter "roblox-settings-before-*.xml" -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -Skip 5 | Remove-Item -Force -ErrorAction SilentlyContinue
+        return @{ Ok = $true; Msg = "" }
     } catch {
         Remove-Item -LiteralPath "$($f.FullName).rml-tmp" -Force -ErrorAction SilentlyContinue
-        Say "Couldn't change Roblox's settings: $($_.Exception.Message)"
+        return @{ Ok = $false; Msg = "Couldn't change Roblox's settings: $($_.Exception.Message)" }
     }
+}
+$script:RbxSyncOff = $false
+function Sync-RobloxGraphics {
+    # "Keep Roblox on these settings": while no Roblox is running, BloxKit puts the picked quality
+    # and frame rate into Roblox's file itself (every client reads it when it starts), so nobody
+    # has to close everything and click Save to Roblox. Changes made in a game are put back.
+    if ($script:RbxSyncOff -or -not $script:State.rbxAuto -or -not $script:CanWriteRoblox) { return }
+    $q = [int]$script:State.rbxQuality; $fps = [int]$script:State.rbxFps
+    if ($q -lt 1 -or $fps -eq 0) { return }                     # nothing picked
+    if ((Get-RobloxRunningCount) -gt 0) { return }               # a running client would overwrite it
+    $g = Get-CurrentRobloxGraphics
+    if ($null -eq $g.Quality) { return }                         # Roblox hasn't made its file yet (never opened)
+    if ($g.Quality -eq $q -and (Get-FpsChoice $g.FpsCap) -eq (Get-FpsChoice $fps)) { return }
+    $r = Write-RobloxGraphics $q $fps
+    $now = Get-CurrentRobloxGraphics
+    if (-not $r.Ok -or $now.Quality -ne $q) { $script:RbxSyncOff = $true; if ($r.Msg) { Say $r.Msg }; return }   # don't keep trying this session
+    Say "Roblox is set to $(Format-RobloxGraphics $now) (Settings > Performance), ready for the next client."
     Update-PerfUi
 }
 function Undo-RobloxGraphics {
     if (-not $script:CanWriteRoblox) { Say "(test mode) Roblox's settings file isn't changed."; return }
     $b = Get-ChildItem $AppDir -Filter "roblox-settings-before-*.xml" -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
     if (-not $b) { Say "Nothing to undo: Roblox's settings weren't changed by this app."; return }
-    if ((Get-RobloxRunningCount) -gt 0) { [BkBox]::Show("Close all Roblox windows first.", "Roblox graphics", "OK", "Information") | Out-Null; return }
+    if (-not (Confirm-RobloxClosed "put the old settings back")) { Update-PerfUi; return }
     # Back into the same file it was copied from (its name is in the backup's name).
     $target = $(if ($b.Name -match '__(GlobalBasicSettings_\d+\.xml)$') { Join-Path $RobloxDataDir $Matches[1] } else { $x = Get-RobloxSettingsFile; if ($x) { $x.FullName } else { "" } })
     if (-not $target) { Say "Couldn't find Roblox's settings file."; return }
@@ -4321,12 +4361,14 @@ function Update-PerfUi {
     $running = Get-RobloxRunningCount
     $pick = Get-GraphicsPicks
     $differs = $null -ne $g.Quality -and ($g.Quality -ne $pick.Quality -or (Get-FpsChoice $g.FpsCap) -ne (Get-FpsChoice $pick.FpsCap))
-    $ui.RbxNowText.Text = "Roblox now: " + (Format-RobloxGraphics $g) + $(if (-not $script:CanWriteRoblox) { ".  (test mode: not changed)" } elseif ($running) { ".  Close Roblox ($running running) to change it." } else { "." }) +
-        $(if ($differs) { "  Your picks above aren't in Roblox yet: click 'Save to Roblox'." } else { "" })
-    $ui.RbxApplyBtn.IsEnabled = $script:CanWriteRoblox -and -not $running -and $null -ne $g.Quality
-    $ui.RbxUndoBtn.IsEnabled = $script:CanWriteRoblox -and -not $running
+    $ui.RbxNowText.Text = $(if ($null -eq $g.Quality) { "Roblox hasn't made its settings file yet: open Roblox once, then BloxKit can set it." } else { "Roblox now: " + (Format-RobloxGraphics $g) + "." }) +
+        $(if (-not $script:CanWriteRoblox) { "  (test mode: not changed)" } elseif ($running) { "  Roblox is running ($running), so it can't change now." } else { "" }) +
+        $(if (-not $differs) { "" } elseif ($script:State.rbxAuto) { "  Your picks go in by themselves once no Roblox is running, or click Save to Roblox." } else { "  Your picks above aren't in Roblox yet: click Save to Roblox." })
+    # Always clickable: with Roblox running it offers to close it first (leftover background ones too).
+    $ui.RbxApplyBtn.IsEnabled = $script:CanWriteRoblox
+    $ui.RbxUndoBtn.IsEnabled = $script:CanWriteRoblox
     foreach ($b in $ui.RbxApplyBtn, $ui.RbxUndoBtn) { [System.Windows.Controls.ToolTipService]::SetShowOnDisabled($b, $true) }
-    $ui.RbxApplyBtn.ToolTip = $(if ($running) { "Close all Roblox windows first." } else { "Write these two settings into Roblox's settings file." })
+    $ui.RbxApplyBtn.ToolTip = $(if ($running) { "Asks to close all Roblox first ($running running), then saves." } else { "Write these two settings into Roblox's settings file." })
     $script:FillingPerf = $true
     $m = Get-PerfPresetMatch
     Select-ComboTag $ui.PerfPresetBox $m
@@ -4343,7 +4385,8 @@ function Set-PerfPreset([string]$key) {
     if (-not $NoRoblox) { Apply-Efficiency; Apply-LowPower }
     $g = Get-CurrentRobloxGraphics
     if ($g.Quality -eq $p.Quality -and $g.FpsCap -eq $p.Fps) { Say "$($p.Name) is on." }
-    else { Say "$($p.Name) is on for the app. Click 'Save to Roblox' (with Roblox closed) for quality $($p.Quality) at $($p.Fps) FPS." }
+    elseif ($script:State.rbxAuto) { Say "$($p.Name) is on. Roblox gets quality $($p.Quality) at $($p.Fps) FPS by itself once no Roblox is running (or click Save to Roblox)."; Sync-RobloxGraphics }
+    else { Say "$($p.Name) is on for the app. Click 'Save to Roblox' for quality $($p.Quality) at $($p.Fps) FPS." }
     Update-PerfUi
 }
 
@@ -4475,6 +4518,7 @@ function Queue-Items($items) {
     if ($items.Count -eq 0) { return }
     foreach ($it in $items) { $script:Q.Add($it) | Out-Null; Set-AccStatus $it.Acc.nick "opening" }
     if (-not $script:QBusy) {
+        Sync-RobloxGraphics   # the picked graphics, if no Roblox is running yet
         $script:QBusy = $true; $script:QTotal = 0; $script:QDone = 0; $script:QLoaded = 0; $script:QFailed.Clear()
         $script:QPhase = "idle"
         $ui.RetryBtn.Visibility = "Collapsed"
@@ -5952,6 +5996,8 @@ Select-ComboTag $ui.RbxFpsBox (Get-FpsChoice $g0.FpsCap)
 $ui.RbxQualityBox.Add_SelectionChanged({ Save-GraphicsPicks })
 $ui.RbxFpsBox.Add_SelectionChanged({ Save-GraphicsPicks })
 $ui.RbxApplyBtn.Add_Click({ Save-RobloxGraphicsChoice })
+$ui.RbxAutoBox.IsChecked = $State.rbxAuto
+$ui.RbxAutoBox.Add_Click({ $script:State.rbxAuto = [bool]$ui.RbxAutoBox.IsChecked; $script:RbxSyncOff = $false; Save-Settings; Update-PerfUi; Sync-RobloxGraphics })
 $ui.RbxUndoBtn.Add_Click({ Undo-RobloxGraphics })
 
 
@@ -6254,6 +6300,8 @@ $Tick.Add_Tick({
         if ($script:SessionDirty) { Save-Session }
     }
     if ($script:TickCount % 10 -eq 5) { Apply-Efficiency -Force }
+    if ($script:TickCount % 10 -eq 7) { Sync-RobloxGraphics }   # keeps Roblox on the picked graphics while none is running
+    if ($script:TickCount % 3 -eq 2 -and $ui.TabSettings.IsSelected -and $win.IsVisible) { Update-PerfUi }   # so Save to Roblox and the line under it follow what is running
     # Your PC right now (Live screens): one ~10 ms reading every 5 s while the window is open.
     if ($script:TickCount % 5 -eq 2 -and $win.IsVisible -and $win.WindowState -ne "Minimized") { try { Update-LoadMonitor } catch {} }
     if (Test-PlanActive) {
@@ -6344,6 +6392,7 @@ if (-not $NoRoblox) { Grab-Locks | Out-Null }
 Update-AutoJoinBox
 $script:LoadWarm = Start-LoadWarmUp   # in the background, so "Your PC right now" never freezes the window
 Update-PerfUi
+Sync-RobloxGraphics   # a new install, or graphics changed in a game: Roblox gets the picked ones before anything opens
 $ui.LinkBox.Text = $State.lastLink
 Render-Favorites
 Render-Groups
