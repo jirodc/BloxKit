@@ -2,7 +2,10 @@ ROBLOX MANAGER - QUICK GUIDE
 ============================
 
 One app for everything: your accounts, live screens of every Roblox window,
-anti-AFK, alerts, and more. It replaces the old Launcher and Control Panel.
+anti-AFK, alerts, and more. Windows 10 or 11 and Google Chrome; nothing
+to install.
+
+Not made by or affiliated with Roblox Corporation.
 
 START
 Double-click RobloxManager.exe. Keep all files in this folder together
@@ -11,13 +14,10 @@ Right-click RobloxManager.exe > "Pin to Start" or "Pin to taskbar" to keep it
 handy. If Windows shows "Windows protected your PC": click "More info" >
 "Run anyway" (the app isn't signed, so Windows doesn't know it yet).
 
-No RobloxManager.exe? Double-click "Start Roblox Manager.bat" instead (same
-app), or build the .exe yourself, nothing to install:
+RobloxManager.exe is built from launcher\RobloxManager.cs. To build it
+yourself (nothing to install, it uses the C# compiler that comes with Windows):
     powershell -ExecutionPolicy Bypass -File tools\build-app.ps1
-It's built from launcher\RobloxManager.cs with the C# compiler that comes
-with Windows.
 
-Your old accounts and settings carry over automatically.
 It never sees your passwords. Chrome keeps your logins, not this app.
 
 

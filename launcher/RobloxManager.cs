@@ -38,32 +38,44 @@ static class Program
         iss.ExecutionPolicy = Microsoft.PowerShell.ExecutionPolicy.Bypass;   // for this app only, like the .bat's -ExecutionPolicy Bypass
         iss.ApartmentState = ApartmentState.STA;                              // the window needs it
         iss.ThreadOptions = PSThreadOptions.UseCurrentThread;
+        Runspace rs = RunspaceFactory.CreateRunspace(iss);
         try
         {
-            using (Runspace rs = RunspaceFactory.CreateRunspace(iss))
+            rs.Open();
+            using (PowerShell ps = PowerShell.Create())
             {
-                rs.Open();
-                using (PowerShell ps = PowerShell.Create())
+                ps.Runspace = rs;
+                ps.AddCommand(script);
+                foreach (string a in args)
                 {
-                    ps.Runspace = rs;
-                    ps.AddCommand(script);
-                    foreach (string a in args)
-                    {
-                        // The script only takes switches: -Minimized (from Windows startup), -NoRoblox.
-                        if (a.StartsWith("-") && a.Length > 1) ps.AddParameter(a.Substring(1));
-                    }
-                    ps.Invoke();
+                    // The script only takes switches: -Minimized (from Windows startup), -NoRoblox.
+                    if (a.StartsWith("-") && a.Length > 1) ps.AddParameter(a.Substring(1));
                 }
+                ps.Invoke();
             }
             return 0;
         }
         catch (Exception e)
         {
-            Exception inner = e;
-            while (inner.InnerException != null) inner = inner.InnerException;
-            MessageBox.Show("Sorry, Roblox Manager couldn't start:\n\n" + inner.Message, "Roblox Manager",
-                MessageBoxButtons.OK, MessageBoxIcon.Error);
+            if (!ErrorAlreadyShown(rs))
+            {
+                Exception inner = e;
+                while (inner.InnerException != null) inner = inner.InnerException;
+                MessageBox.Show("Sorry, Roblox Manager couldn't start:\n\n" + inner.Message, "Roblox Manager",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
             return 1;
         }
+        finally
+        {
+            rs.Dispose();
+        }
+    }
+
+    static bool ErrorAlreadyShown(Runspace rs)
+    {
+        // The script's own error box (its trap) sets this after telling the user.
+        try { return rs.SessionStateProxy.GetVariable("RmlErrorShown") is bool && (bool)rs.SessionStateProxy.GetVariable("RmlErrorShown"); }
+        catch { return false; }
     }
 }

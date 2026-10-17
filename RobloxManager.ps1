@@ -1327,6 +1327,7 @@ function Release-Instance { try { $script:InstanceLock.ReleaseMutex() } catch {}
 
 trap {
     [System.Windows.MessageBox]::Show("Sorry, something went wrong:`n`n$_", "Roblox Manager", "OK", "Error") | Out-Null
+    $global:RmlErrorShown = $true   # RobloxManager.exe then doesn't show a second box
     break
 }
 

@@ -20,7 +20,9 @@ $graphics = $(if ($gbs) { Read-RobloxGraphics ([IO.File]::ReadAllText($gbs.FullN
 $pref = @()
 $k = "HKCU:\Software\Microsoft\DirectX\UserGpuPreferences"
 if (Test-Path $k) { $pref = @((Get-ItemProperty $k).PSObject.Properties | Where-Object { $_.Name -match 'Roblox' } | ForEach-Object { "$($_.Name) = $($_.Value)" }) }
-$mgr = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match 'RobloxManager\.ps1' -and $_.CommandLine -notmatch 'NoRoblox|measure-load' }) | Select-Object -First 1
+# The app: RobloxManager.exe, or PowerShell running RobloxManager.ps1 (the .bat). Test copies (-NoRoblox) don't count.
+$mgr = @(Get-CimInstance Win32_Process -Filter "Name='RobloxManager.exe' OR Name='powershell.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { ($_.Name -eq 'RobloxManager.exe' -or $_.CommandLine -match 'RobloxManager\.ps1') -and $_.CommandLine -notmatch 'NoRoblox|measure-load' }) | Select-Object -First 1
 
 Out-Line "ROBLOX MANAGER - LOAD MEASUREMENT  $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
 Out-Line "Processor:   $cpuName ($([Environment]::ProcessorCount) threads)"
