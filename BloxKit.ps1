@@ -13,12 +13,13 @@
 
 param([switch]$TestOnly, [switch]$Minimized, [switch]$NoRoblox)
 
-$BkVersion = "1.2.0"   # shown in Settings > Help and feedback; bug reports ask for it
+$BkVersion = "1.3.0"   # shown in Settings > Help and feedback; bug reports ask for it
 $BkLinks = @{
     Discord = "https://discord.gg/n24kcvG8zZ"   # the community server (invite never expires); empty hides the "Join the BloxKit Discord" button
     Repo    = "https://github.com/jirodc/BloxKit"
     Bug     = "https://github.com/jirodc/BloxKit/issues/new?template=bug_report.yml"
     Idea    = "https://github.com/jirodc/BloxKit/issues/new?template=feature_request.yml"
+    Raw     = "https://raw.githubusercontent.com/jirodc/BloxKit/main/BloxKit.ps1"   # the update check reads $BkVersion from its first lines
 }
 # -NoRoblox is for tools and tests: the app opens with its settings but never opens Chrome or touches
 # Roblox windows, the multi-window lock, hotkeys or the daily start, and runs next to a real copy.
@@ -2848,6 +2849,7 @@ Ctrl+Alt+A       anti-AFK on / off</TextBlock>
                     <Button x:Name="BugBtn" Content="Report a bug" Style="{StaticResource Btn}" Margin="0,0,8,8" ToolTip="Opens a short form on GitHub (needs a free GitHub account)"/>
                     <Button x:Name="IdeaBtn" Content="Suggest a feature" Style="{StaticResource Btn}" Margin="0,0,8,8" ToolTip="Opens a short form on GitHub (needs a free GitHub account)"/>
                     <Button x:Name="RepoBtn" Content="BloxKit on GitHub" Style="{StaticResource Btn}" Margin="0,0,8,8"/>
+                    <Button x:Name="UpdateBtn" Content="Check for updates" Style="{StaticResource Btn}" Margin="0,0,8,8" ToolTip="Gets the newest BloxKit from GitHub into this folder; your accounts and settings stay"/>
                   </WrapPanel>
                 </StackPanel>
               </Grid>
@@ -6223,6 +6225,70 @@ $ui.DiscordBtn.Add_Click({ Start-Process $BkLinks.Discord })
 $ui.BugBtn.Add_Click({ Start-Process $BkLinks.Bug })
 $ui.IdeaBtn.Add_Click({ Start-Process $BkLinks.Idea })
 $ui.RepoBtn.Add_Click({ Start-Process $BkLinks.Repo })
+
+# ---- updates: compares with the newest BloxKit on GitHub, and updates this folder in place ----
+$script:UpdNewest = $null; $script:UpdTask = $null
+function Start-UpdateCheck {
+    # In the background: only the first 4 KB of BloxKit.ps1 on GitHub, enough for its $BkVersion.
+    if ($NoRoblox -or $script:UpdTask) { return }
+    try {
+        Add-Type -AssemblyName System.Net.Http
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        $c = New-Object System.Net.Http.HttpClient; $c.Timeout = [TimeSpan]::FromSeconds(15)
+        $rq = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Get, $BkLinks.Raw)
+        $rq.Headers.Range = New-Object System.Net.Http.Headers.RangeHeaderValue(0, 4095)
+        $script:UpdTask = $c.SendAsync($rq)
+    } catch { $script:UpdTask = $null }
+}
+function Read-UpdateCheck {
+    # Called by the timer until the answer is in.
+    $t = $script:UpdTask
+    if (-not $t -or -not $t.IsCompleted) { return }
+    $script:UpdTask = $null
+    try {
+        if ($t.IsFaulted -or -not $t.Result.IsSuccessStatusCode) { return }
+        $m = [regex]::Match($t.Result.Content.ReadAsStringAsync().Result, '(?m)^\$BkVersion\s*=\s*"([\d.]+)"')
+        if (-not $m.Success) { return }
+        $script:UpdNewest = [version]$m.Groups[1].Value
+        Update-UpdateUi
+        if ($script:UpdNewest -gt [version]$BkVersion) {
+            Say "BloxKit $($script:UpdNewest) is out (you have $BkVersion). Settings > Help and feedback > Update."
+            Show-MascotMoment "Attention" "BloxKit $($script:UpdNewest) is out: Settings > Help and feedback." 8
+        }
+    } catch {}
+}
+function Update-UpdateUi {
+    if ($script:UpdNewest -and $script:UpdNewest -gt [version]$BkVersion) { $ui.UpdateBtn.Content = "Update to $($script:UpdNewest)"; $ui.UpdateBtn.Background = Brush "Accent" }
+    else { $ui.UpdateBtn.Content = "Check for updates"; $ui.UpdateBtn.ClearValue([System.Windows.Controls.Control]::BackgroundProperty) }
+}
+function Start-Update {
+    $upd = Join-Path $PSScriptRoot "tools\update.ps1"
+    if (-not (Test-Path -LiteralPath $upd)) { Start-Process $BkLinks.Repo; Say "The updater isn't in this folder. Download BloxKit again from GitHub (opened in your browser)."; return }
+    $r = [BkBox]::Show("Update BloxKit $BkVersion to $($script:UpdNewest)?`n`nBloxKit closes, gets the new version from GitHub, and opens again in a few seconds. Your accounts and settings stay, and Roblox keeps running.", "Update BloxKit", "YesNo", "Question")
+    if ($r -ne "Yes") { return }
+    # The updater runs from a copy in Temp, so it can replace its own file in this folder too.
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "bloxkit-updater.ps1"
+    Copy-Item -LiteralPath $upd $tmp -Force
+    Start-Process powershell -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$tmp`" -AppDir `"$PSScriptRoot`" -WaitPid $PID -Restart -Quiet"
+    Say "Updating BloxKit... it opens again in a few seconds."
+    Release-Instance   # so the updated copy can start
+    $script:ReallyExit = $true
+    $win.Close()
+}
+$ui.UpdateBtn.Add_Click({
+    if ($NoRoblox) { Say "(test mode) no updates in test mode."; return }
+    if (-not $script:UpdNewest) {
+        # Not checked yet (or no answer): ask now, for up to 15 seconds.
+        Say "Checking GitHub for a newer BloxKit..."
+        Start-UpdateCheck
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        while ($script:UpdTask -and -not $script:UpdTask.IsCompleted -and $sw.ElapsedMilliseconds -lt 15000) { Start-Sleep -Milliseconds 100 }
+        Read-UpdateCheck
+        if (-not $script:UpdNewest) { Say "Couldn't reach GitHub to check for updates. Try again later."; return }
+    }
+    if ($script:UpdNewest -le [version]$BkVersion) { Say "You have the newest BloxKit ($BkVersion)."; Show-MascotMoment "Success" "BloxKit $BkVersion is the newest."; return }
+    Start-Update
+})
 $ui.ImportBtn.Add_Click({ Import-Backup })
 
 # Window events
@@ -6278,6 +6344,7 @@ $Tick.Interval = [TimeSpan]::FromSeconds(1)
 $Tick.Add_Tick({
     $script:TickCount++
     Update-Mascot   # the mascot and its line follow what's really happening
+    if ($script:UpdTask) { Read-UpdateCheck }
     if ($NoRoblox) {   # tests: no Roblox windows, only the schedule's clock
         if ($script:ShowSignal.WaitOne(0)) { Show-App }
         if (Test-PlanActive) { Invoke-Plan "tick"; if ($ui.TabSchedule.IsSelected) { Update-ScheduleLive } }
@@ -6407,6 +6474,16 @@ if (-not $ChromeExe) { Say "Warning: Google Chrome wasn't found. This app needs 
 elseif (@($State.accounts).Count -eq 0) { Say "Welcome! Start by clicking '+ Add account' for your main account." }
 else { Say "Ready. Tip: 'Start everything' opens your main first, then sends every alt to its server." }
 if ($script:AfkOn) { Say "Anti-AFK is on, as it was when the app closed." }
+# Just updated? The updater leaves a note (and says whether the Chrome helper changed).
+$UpdNote = Join-Path $AppDir "updated.txt"
+if (Test-Path -LiteralPath $UpdNote) {
+    $t = ("" + (Get-Content -LiteralPath $UpdNote -Raw)).Trim(); Remove-Item -LiteralPath $UpdNote -Force -ErrorAction SilentlyContinue
+    if ($t -match '^from (\S+) to (\S+)') {
+        Say ("Updated BloxKit $($Matches[1]) to $($Matches[2])." + $(if ($t -match 'helper') { " The auto-click helper changed too: in each Chrome profile, open chrome://extensions and click its reload arrow." } else { "" }))
+        Show-MascotMoment "Celebrate" "Updated to BloxKit $($Matches[2])." 6
+    } elseif ($t -match '^same') { Say "You already have the newest BloxKit ($BkVersion)." }
+}
+Start-UpdateCheck   # in the background; Settings > Help and feedback shows "Update to ..." when there's a newer one
 $Tick.Start()
 if ($script:PollKeys.Count -gt 0) {
     $Keys.Start()
