@@ -13,7 +13,7 @@
 
 param([switch]$TestOnly, [switch]$Minimized, [switch]$NoRoblox)
 
-$BkVersion = "1.1.0"   # shown in Settings > Help and feedback; bug reports ask for it
+$BkVersion = "1.1.1"   # shown in Settings > Help and feedback; bug reports ask for it
 $BkLinks = @{
     Discord = "https://discord.gg/n24kcvG8zZ"   # the community server (invite never expires); empty hides the "Join the BloxKit Discord" button
     Repo    = "https://github.com/jirodc/BloxKit"
@@ -1363,7 +1363,8 @@ if (-not $gotLock) { [void]$script:ShowSignal.Set(); return }
 function Release-Instance { try { $script:InstanceLock.ReleaseMutex() } catch {} }
 
 trap {
-    [System.Windows.MessageBox]::Show("Sorry, something went wrong:`n`n$_", "BloxKit", "OK", "Error") | Out-Null
+    # The line number tells exactly where, when someone sends a screenshot of this box.
+    [System.Windows.MessageBox]::Show("Sorry, something went wrong:`n`n$_`n`n(BloxKit $BkVersion, BloxKit.ps1 line $($_.InvocationInfo.ScriptLineNumber))", "BloxKit", "OK", "Error") | Out-Null
     $global:RmlErrorShown = $true   # BloxKit.exe then doesn't show a second box
     break
 }
@@ -5649,7 +5650,11 @@ function Check-Schedule {
         Update-SchedUi
     }
 }
-$StartupLnk = Join-Path ([Environment]::GetFolderPath("Startup")) "BloxKit.lnk"
+# Windows' Startup folder ("Open BloxKit when Windows starts"). Some PCs don't have one (cleanup
+# tools delete it), and then .NET gives an empty path, so ask for it anyway; it's made when needed.
+$StartupDir = [Environment]::GetFolderPath([Environment+SpecialFolder]::Startup, [Environment+SpecialFolderOption]::DoNotVerify)
+if (-not $StartupDir) { $StartupDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup" }
+$StartupLnk = Join-Path $StartupDir "BloxKit.lnk"
 function Get-AppCommand {
     # How to start this app again: BloxKit.exe when it was opened from there, otherwise PowerShell (like the .bat).
     if ($env:RML_LAUNCHER -and (Test-Path -LiteralPath $env:RML_LAUNCHER)) { return @{ File = $env:RML_LAUNCHER; Args = "" } }
@@ -5660,6 +5665,7 @@ function Set-RunAtStartup([bool]$on, [switch]$Quiet) {
     try {
         if ($on) {
             $cmd = Get-AppCommand
+            if (-not (Test-Path -LiteralPath $StartupDir)) { New-Item -ItemType Directory -Path $StartupDir -Force | Out-Null }
             $sh = New-Object -ComObject WScript.Shell
             $lnk = $sh.CreateShortcut($StartupLnk)
             $lnk.TargetPath = $cmd.File
@@ -6152,7 +6158,7 @@ $ui.SchedUseLinkBtn.Add_Click({
     $script:State.schedLink = $info.Url; Save-Settings; Update-SchedUi
     Say "Scheduled start will use this game."
 })
-$OldStartupLnk = Join-Path ([Environment]::GetFolderPath("Startup")) "Roblox Manager.lnk"   # the app's name before BloxKit
+$OldStartupLnk = Join-Path $StartupDir "Roblox Manager.lnk"   # the app's name before BloxKit
 if (-not $NoRoblox -and (Test-Path $OldStartupLnk)) { Remove-Item $OldStartupLnk -Force -ErrorAction SilentlyContinue; Set-RunAtStartup $true -Quiet }
 $ui.StartupBox.IsChecked = (Test-Path $StartupLnk)
 # Opened from BloxKit.exe: an older startup shortcut (PowerShell) is switched over to it.
