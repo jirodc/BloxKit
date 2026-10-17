@@ -160,7 +160,13 @@ Right side:
 
 Click spot: on a screen, **...** > **Set click spot**, then click the place on that live screen (an empty bit of sky, or a button you want pressed, like "Claim"). Esc cancels. It's saved per account.
 
-First time: **...** > **Test anti-AFK** on a screen. If it reacts, Hidden mode works (no flicker). If not, the app switches to Quick switch.
+**How it sends the input.** Roblox only takes real key presses, and only in its focused window, so every mode gives the window the focus for a moment:
+
+- **Hidden, no flicker:** each window is moved just past the edge of your screens, gets the focus and the key there, and goes back once the window you were using has the focus again (about a third of a second). Nothing pops up, and the live screens keep showing it. It waits for a 2-second pause in your typing, so your keys don't end up in Roblox.
+- **Quick switch:** each window comes to the front for a moment. It only runs after you've been away from the PC for 10 seconds.
+- **Click a spot** always works the Quick switch way (it moves the real mouse pointer, which can't click off-screen).
+
+Try it: **...** > **Test anti-AFK** on a screen. If the screen reacts, Hidden mode works on your PC; if not, the app switches to Quick switch.
 
 ## Kicks and crashes
 

@@ -1490,27 +1490,32 @@ public static class RbxCore {
     }
 
     // ---- anti-AFK input: keys and clicks ----
-    // "Hidden" = sent straight to the window, no focus change (works on many PCs, not all).
-    // "Focus"  = bring the window to the front for a moment and use real input (always works).
+    // Roblox reads the keyboard through raw input and only in its focused window, so keys
+    // posted to a window in the background (PostMessage) are ignored on most PCs.
+    // What always works is real input to the focused window (FocusKey/FocusClick).
+    // "Hidden" mode does that out of sight: Stash moves the window just past the right edge
+    // of the whole desktop, it gets focus and the key there, and Unstash puts it back (behind
+    // everything) once the window you were using has the focus again. The live screens keep
+    // showing it, because a DWM thumbnail doesn't care where the window is.
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
+    public static RECT Stash(IntPtr h) {
+        RECT r;
+        GetWindowRect(h, out r);
+        int x = GetSystemMetrics(76) + GetSystemMetrics(78) + 64;   // SM_XVIRTUALSCREEN + SM_CXVIRTUALSCREEN: past every monitor
+        SetWindowPos(h, IntPtr.Zero, x, GetSystemMetrics(77), 0, 0, 0x0001 | 0x0004 | 0x0010);   // no size, no z-order, no activate
+        return r;
+    }
+    public static void Unstash(IntPtr h, RECT r) {
+        if (IsWindow(h)) SetWindowPos(h, new IntPtr(1), r.Left, r.Top, 0, 0, 0x0001 | 0x0010);   // back where it was, at the bottom, not activated
+    }
     [DllImport("user32.dll")] static extern uint MapVirtualKey(uint code, uint mapType);
     [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr h, ref POINT p);
     [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
     [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] static extern void mouse_event(uint flags, int dx, int dy, uint data, UIntPtr extra);
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
-    const uint WM_MOUSEMOVE = 0x0200, WM_LBUTTONDOWN = 0x0201, WM_LBUTTONUP = 0x0202;
 
-    public static void HiddenKey(IntPtr h, int vk, int holdMs) {
-        int scan = (int)MapVirtualKey((uint)vk, 0);
-        IntPtr down = new IntPtr(1 | (scan << 16));
-        IntPtr up = new IntPtr(unchecked((int)0xC0000001) | (scan << 16));
-        bool isFront = GetForegroundWindow() == h;
-        if (!isFront) PostMessage(h, WM_ACTIVATE, new IntPtr(1), IntPtr.Zero);
-        PostMessage(h, WM_KEYDOWN, new IntPtr(vk), down);
-        Thread.Sleep(holdMs);
-        PostMessage(h, WM_KEYUP, new IntPtr(vk), up);
-        if (!isFront) PostMessage(h, WM_ACTIVATE, IntPtr.Zero, IntPtr.Zero);
-    }
     public static void FocusKey(IntPtr h, int vk, int holdMs) {
         if (!IsWindow(h)) return;
         if (GetForegroundWindow() != h) { ForceFront(h); Thread.Sleep(150); }
@@ -1521,19 +1526,6 @@ public static class RbxCore {
         Thread.Sleep(60);
     }
     // fx, fy = where to click, as a fraction of the window's picture (0.5, 0.5 = middle)
-    public static void HiddenClick(IntPtr h, double fx, double fy) {
-        RECT r;
-        if (!IsWindow(h) || !GetClientRect(h, out r)) return;
-        int x = (int)(r.Right * fx), y = (int)(r.Bottom * fy);
-        IntPtr lp = new IntPtr((y << 16) | (x & 0xFFFF));
-        bool isFront = GetForegroundWindow() == h;
-        if (!isFront) PostMessage(h, WM_ACTIVATE, new IntPtr(1), IntPtr.Zero);
-        PostMessage(h, WM_MOUSEMOVE, IntPtr.Zero, lp);
-        PostMessage(h, WM_LBUTTONDOWN, new IntPtr(1), lp);
-        Thread.Sleep(70);
-        PostMessage(h, WM_LBUTTONUP, IntPtr.Zero, lp);
-        if (!isFront) PostMessage(h, WM_ACTIVATE, IntPtr.Zero, IntPtr.Zero);
-    }
     public static void FocusClick(IntPtr h, double fx, double fy) {
         RECT r;
         if (!IsWindow(h) || !GetClientRect(h, out r)) return;
@@ -2607,10 +2599,10 @@ function Get-ThemeXaml {
 
                   <TextBlock Text="HOW IT SENDS INPUT" Style="{StaticResource Eyebrow}"/>
                   <RadioButton x:Name="ModeHidden" Margin="0,0,0,8">
-                    <TextBlock TextWrapping="Wrap" Text="Hidden, no flicker. Try  ... &gt; Test anti-AFK  on a screen first."/>
+                    <TextBlock TextWrapping="Wrap" Text="Hidden, no flicker: each window gets the key off-screen for a moment, so nothing pops up. Waits for a 2-second pause in your typing."/>
                   </RadioButton>
                   <RadioButton x:Name="ModeQuick">
-                    <TextBlock TextWrapping="Wrap" Text="Quick switch. Always works, but only runs after I've been away from the PC for 10 seconds."/>
+                    <TextBlock TextWrapping="Wrap" Text="Quick switch: each window comes to the front for a moment. Only runs after I've been away from the PC for 10 seconds. ('Click a spot' always works this way.)"/>
                   </RadioButton>
                   <CheckBox x:Name="SkipActiveBox" Margin="0,12,0,0">
                     <TextBlock TextWrapping="Wrap" Text="Skip the window I'm playing in"/>
@@ -5129,7 +5121,8 @@ function Close-RobloxWindow($w, [switch]$NoAsk) {
 $script:AfkOn = [bool]$script:State.afkOn   # on again if it was on when the app closed
 $script:Waiting = $false
 $script:SecondsLeft = 300
-$IdleNeededMs = 10000
+$IdleNeededMs = 10000   # a visible switch (Quick mode, or a click) waits until you are away this long
+$HiddenIdleMs = 2000    # hidden mode only waits for a short pause in your typing
 
 function Get-Targets {
     $fg = [RbxCore]::GetForegroundWindow()
@@ -5146,25 +5139,20 @@ function Get-Targets {
 # Each action is a small, harmless input that resets Roblox's idle timer.
 $AfkActionNames = [ordered]@{ jump = "jump"; walk = "step"; zoom = "zoom"; click = "click" }
 
-function Invoke-AfkAction($w, [string]$act, [bool]$hidden) {
+function Invoke-AfkAction($w, [string]$act, [bool]$hidden, $back = [IntPtr]::Zero) {
+    # Real input to the focused window (the only kind Roblox takes). In hidden mode the window
+    # gets the focus off-screen; returns where it was so Do-Jumps can put it back afterwards.
+    # A click moves the real mouse pointer, so it can't happen off-screen: it shows the window.
     $h = $w.Handle
+    $stash = $null
+    if ($hidden -and $act -ne "click" -and $h -ne $back) { $stash = [RbxCore]::Stash($h) }
     switch ($act) {
-        "walk" {
-            if ($hidden) { [RbxCore]::HiddenKey($h, 0x57, 180); [RbxCore]::HiddenKey($h, 0x53, 180) }
-            else { [RbxCore]::FocusKey($h, 0x57, 180); [RbxCore]::FocusKey($h, 0x53, 180) }
-        }
-        "zoom" {
-            if ($hidden) { [RbxCore]::HiddenKey($h, 0x49, 120); [RbxCore]::HiddenKey($h, 0x4F, 120) }
-            else { [RbxCore]::FocusKey($h, 0x49, 120); [RbxCore]::FocusKey($h, 0x4F, 120) }
-        }
-        "click" {
-            if ($hidden) { [RbxCore]::HiddenClick($h, $w.ClickX, $w.ClickY) }
-            else { [RbxCore]::FocusClick($h, $w.ClickX, $w.ClickY) }
-        }
-        default {
-            if ($hidden) { [RbxCore]::HiddenKey($h, 0x20, 100) } else { [RbxCore]::FocusKey($h, 0x20, 100) }
-        }
+        "walk" { [RbxCore]::FocusKey($h, 0x57, 180); [RbxCore]::FocusKey($h, 0x53, 180) }
+        "zoom" { [RbxCore]::FocusKey($h, 0x49, 120); [RbxCore]::FocusKey($h, 0x4F, 120) }
+        "click" { [RbxCore]::FocusClick($h, $w.ClickX, $w.ClickY) }
+        default { [RbxCore]::FocusKey($h, 0x20, 100) }
     }
+    return $stash
 }
 
 function Pick-AfkAction {
@@ -5177,17 +5165,27 @@ function Do-Jumps([switch]$Manual) {
     $targets = @(Get-Targets)
     if ($targets.Count -eq 0) { Say "No screens to keep awake (turn AFK on for at least one screen)."; return $true }
     $hidden = $script:State.afkMode -eq "hidden"
-    if (-not $hidden -and -not $Manual -and [RbxCore]::IdleMs() -lt $IdleNeededMs) { return $false }
+    $picks = @(foreach ($w in $targets) { @{ W = $w; Act = (Pick-AfkAction) } })   # each screen gets its own random pick
+    # Every mode briefly moves the keyboard focus, so it waits for a pause in your typing.
+    # Hidden mode needs a short one (nothing shows); a visible switch, or a click, needs you away.
+    $visible = (-not $hidden) -or @($picks | Where-Object { $_.Act -eq "click" }).Count
+    $need = $(if ($visible) { $IdleNeededMs } else { $HiddenIdleMs })
+    if (-not $Manual -and [RbxCore]::IdleMs() -lt $need) { return $false }
     $back = [RbxCore]::GetForegroundWindow()
     $t = Get-Date -Format "HH:mm"
-    $done = @()
-    foreach ($w in $targets) {
-        $act = Pick-AfkAction    # each screen gets its own random pick
-        Invoke-AfkAction $w $act $hidden
-        $w.LastJump = "$t $($AfkActionNames[$act])"; $done += $AfkActionNames[$act]
-        Update-TileInfo $w
+    $done = @(); $stashed = @()
+    try {
+        foreach ($p in $picks) {
+            $r = Invoke-AfkAction $p.W $p.Act $hidden $back
+            if ($null -ne $r) { $stashed += @{ H = $p.W.Handle; R = $r } }
+            $p.W.LastJump = "$t $($AfkActionNames[$p.Act])"; $done += $AfkActionNames[$p.Act]
+            Update-TileInfo $p.W
+        }
+    } finally {
+        # Focus goes back first, then the windows come back, so none of them ever shows up front.
+        if ([RbxCore]::IsWindow($back)) { [RbxCore]::ForceFront($back) }
+        foreach ($s in $stashed) { [RbxCore]::Unstash($s.H, $s.R) }
     }
-    if (-not $hidden -and [RbxCore]::IsWindow($back)) { [RbxCore]::ForceFront($back) }
     $what = ($done | Group-Object | ForEach-Object { "$($_.Count) $($_.Name)" }) -join ", "
     Say "Anti-AFK: $what ($($script:State.afkMode) mode)."
     return $true
@@ -5197,14 +5195,20 @@ function Test-HiddenJump($w) {
     $ui.Tabs.SelectedItem = $ui.TabScreens
     $acts = @($script:State.afkActions); if ($acts.Count -eq 0) { $acts = @("jump") }
     $names = ($acts | ForEach-Object { $AfkActionNames[$_] }) -join ", "
-    $r = [BkBox]::Show("Watch screen $(Label-Of $w).`n`nClick OK. Right after, it will try these in the background, one by one: $names.", "Test anti-AFK", "OKCancel", "Information")
+    $r = [BkBox]::Show("Watch screen $(Label-Of $w) here on the Live screens tab.`n`nClick OK and don't touch the keyboard for a few seconds. It will do these the hidden way (off-screen, nothing pops up), one by one: $names.", "Test anti-AFK", "OKCancel", "Information")
     if ($r -ne "OK") { return }
     Start-Sleep -Milliseconds 300
-    foreach ($a in $acts) { Invoke-AfkAction $w $a $true; Start-Sleep -Milliseconds 700 }
+    $back = [RbxCore]::GetForegroundWindow()
+    foreach ($a in $acts) {
+        $s = Invoke-AfkAction $w $a $true $back
+        if ([RbxCore]::IsWindow($back)) { [RbxCore]::ForceFront($back) }
+        if ($null -ne $s) { [RbxCore]::Unstash($w.Handle, $s) }
+        Start-Sleep -Milliseconds 700
+    }
     Start-Sleep -Milliseconds 500
     $ans = [BkBox]::Show("Did screen $(Label-Of $w) react ($names)?", "Test anti-AFK", "YesNo", "Question")
-    if ($ans -eq "Yes") { $ui.ModeHidden.IsChecked = $true; $script:State.afkMode = "hidden"; Say "Hidden input works on your PC. Anti-AFK will stay invisible." }
-    else { $ui.ModeQuick.IsChecked = $true; $script:State.afkMode = "quick"; Say "Hidden input didn't work, so I switched to Quick switch (it runs only while you're away)." }
+    if ($ans -eq "Yes") { $ui.ModeHidden.IsChecked = $true; $script:State.afkMode = "hidden"; Say "Hidden mode works on your PC. Anti-AFK will stay out of sight."; Show-MascotMoment "Success" "Hidden anti-AFK works on this PC." }
+    else { $ui.ModeQuick.IsChecked = $true; $script:State.afkMode = "quick"; Say "Hidden mode didn't work here, so I switched to Quick switch (it runs only while you're away)." }
     Save-Settings
 }
 
@@ -5260,7 +5264,9 @@ function Update-AfkUi {
         $ui.AfkToggle.Content = "Anti-AFK is ON  (click to turn off)"
         $ui.AfkToggle.Background = Brush "SuccessStrong"
         $names = (@($script:State.afkActions) | ForEach-Object { $AfkActionNames[$_] }) -join ", "
-        if ($script:Waiting) { $ui.AfkStatus.Text = "Ready to $names. Waiting until you're away from the PC for 10 seconds..." }
+        if ($script:Waiting) {
+            $ui.AfkStatus.Text = "Ready to $names. " + $(if ($script:State.afkMode -eq "hidden" -and @($script:State.afkActions) -notcontains "click") { "Waiting for a short pause in your typing..." } else { "Waiting until you're away from the PC for 10 seconds..." })
+        }
         else { $ui.AfkStatus.Text = "Next $names in $clock" }
         $ui.AfkPillDot.Fill = Brush "Success"
         $ui.AfkPillText.Text = $(if ($script:Waiting) { "Anti-AFK waiting for you to step away" } else { "Anti-AFK on  -  next in $clock" })
