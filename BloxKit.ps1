@@ -2297,7 +2297,7 @@ function Get-ThemeXaml {
 
     <!-- Header: name on the left, live status pills on the right (visible from every tab) -->
     <Grid Grid.Row="0" Margin="0,0,0,12">
-      <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+      <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
       <!-- The mascot shows how things are going; the line under the name says it in words. -->
       <Grid x:Name="MascotBox" Width="60" Height="60" Margin="0,0,10,0" RenderTransformOrigin="0.5,0.9" AutomationProperties.Name="BloxKit mascot">
         <Grid.RenderTransform><ScaleTransform x:Name="MascotScale"/></Grid.RenderTransform>
@@ -2309,20 +2309,28 @@ function Get-ThemeXaml {
         <TextBlock x:Name="MascotSays" Style="{StaticResource Hint}" Margin="1,5,0,0" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"
                    Text="Your accounts, live screens and anti-AFK in one place."/>
       </StackPanel>
-      <Button x:Name="AfkPill" Grid.Column="2" Style="{StaticResource Btn}" Background="{StaticResource Raised}" Padding="12,7" Margin="0,0,8,0" VerticalAlignment="Center"
+      <!-- Updates, always in sight: "up to date", or "Update to x.y" when there's a newer BloxKit -->
+      <Button x:Name="UpdatePill" Grid.Column="2" Style="{StaticResource Btn}" Background="{StaticResource Raised}" Padding="12,7" Margin="0,0,8,0" VerticalAlignment="Center"
+              ToolTip="Check GitHub for a newer BloxKit" AutomationProperties.Name="Updates">
+        <StackPanel Orientation="Horizontal">
+          <Ellipse x:Name="UpdatePillDot" Width="8" Height="8" Fill="{StaticResource Off}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+          <TextBlock x:Name="UpdatePillText" Text="Updates" FontWeight="SemiBold"/>
+        </StackPanel>
+      </Button>
+      <Button x:Name="AfkPill" Grid.Column="3" Style="{StaticResource Btn}" Background="{StaticResource Raised}" Padding="12,7" Margin="0,0,8,0" VerticalAlignment="Center"
               ToolTip="Turn anti-AFK on or off (Ctrl+Alt+A)">
         <StackPanel Orientation="Horizontal">
           <Ellipse x:Name="AfkPillDot" Width="8" Height="8" Fill="{StaticResource Off}" VerticalAlignment="Center" Margin="0,0,8,0"/>
           <TextBlock x:Name="AfkPillText" Text="Anti-AFK off" FontWeight="SemiBold"/>
         </StackPanel>
       </Button>
-      <Border x:Name="StatusPill" Grid.Column="3" CornerRadius="8" Padding="12,7" VerticalAlignment="Center" Background="{StaticResource SuccessBg}">
+      <Border x:Name="StatusPill" Grid.Column="4" CornerRadius="8" Padding="12,7" VerticalAlignment="Center" Background="{StaticResource SuccessBg}">
         <StackPanel Orientation="Horizontal">
           <Ellipse x:Name="StatusDot" Width="8" Height="8" Fill="{StaticResource SuccessInk}" VerticalAlignment="Center" Margin="0,0,8,0"/>
           <TextBlock x:Name="StatusText" Text="Multi-window ON" Foreground="{StaticResource SuccessInk}" FontWeight="SemiBold"/>
         </StackPanel>
       </Border>
-      <Button x:Name="FixBtn" Grid.Column="4" Content="Close Roblox and turn on" Style="{StaticResource Btn}" Background="{StaticResource CautionStrong}" Margin="8,0,0,0" Visibility="Collapsed" VerticalAlignment="Center"/>
+      <Button x:Name="FixBtn" Grid.Column="5" Content="Close Roblox and turn on" Style="{StaticResource Btn}" Background="{StaticResource CautionStrong}" Margin="8,0,0,0" Visibility="Collapsed" VerticalAlignment="Center"/>
     </Grid>
 
     <!-- Alert banner (kicks / crashes): restrained red, a clear message, and the way to fix it -->
@@ -6256,7 +6264,10 @@ $ui.IdeaBtn.Add_Click({ Start-Process $BkLinks.Idea })
 $ui.RepoBtn.Add_Click({ Start-Process $BkLinks.Repo })
 
 # ---- updates: compares with the newest BloxKit on GitHub, and updates this folder in place ----
-$script:UpdNewest = $null; $script:UpdTask = $null
+# State: off (test mode) | checking | latest | available | failed. The header pill and the button
+# in Settings > Help and feedback both show it, and do the same when clicked.
+$script:UpdNewest = $null; $script:UpdTask = $null; $script:UpdManual = $false
+$script:UpdState = $(if ($NoRoblox) { "off" } else { "failed" })
 function Start-UpdateCheck {
     # In the background: only the first 4 KB of BloxKit.ps1 on GitHub, enough for its $BkVersion.
     if ($NoRoblox -or $script:UpdTask) { return }
@@ -6267,27 +6278,51 @@ function Start-UpdateCheck {
         $rq = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Get, $BkLinks.Raw)
         $rq.Headers.Range = New-Object System.Net.Http.Headers.RangeHeaderValue(0, 4095)
         $script:UpdTask = $c.SendAsync($rq)
-    } catch { $script:UpdTask = $null }
+        $script:UpdState = "checking"
+    } catch { $script:UpdTask = $null; $script:UpdState = "failed" }
+    Update-UpdateUi
 }
 function Read-UpdateCheck {
-    # Called by the timer until the answer is in.
+    # Called by the 1-second timer until the answer is in.
     $t = $script:UpdTask
     if (-not $t -or -not $t.IsCompleted) { return }
     $script:UpdTask = $null
+    $found = $null
     try {
-        if ($t.IsFaulted -or -not $t.Result.IsSuccessStatusCode) { return }
-        $m = [regex]::Match($t.Result.Content.ReadAsStringAsync().Result, '(?m)^\$BkVersion\s*=\s*"([\d.]+)"')
-        if (-not $m.Success) { return }
-        $script:UpdNewest = [version]$m.Groups[1].Value
-        Update-UpdateUi
-        if ($script:UpdNewest -gt [version]$BkVersion) {
-            Say "BloxKit $($script:UpdNewest) is out (you have $BkVersion). Settings > Help and feedback > Update."
-            Show-MascotMoment "Attention" "BloxKit $($script:UpdNewest) is out: Settings > Help and feedback." 8
+        if (-not $t.IsFaulted -and $t.Result.IsSuccessStatusCode) {
+            $m = [regex]::Match($t.Result.Content.ReadAsStringAsync().Result, '(?m)^\$BkVersion\s*=\s*"([\d.]+)"')
+            if ($m.Success) { $found = [version]$m.Groups[1].Value }
         }
     } catch {}
+    $manual = $script:UpdManual; $script:UpdManual = $false
+    if (-not $found) {
+        $script:UpdState = "failed"; Update-UpdateUi
+        if ($manual) { Say "Couldn't reach GitHub to check for updates. Try again later." }
+        return
+    }
+    $isNew = $found -gt [version]$BkVersion
+    $first = $isNew -and ($script:UpdNewest -ne $found)   # say it once per new version
+    $script:UpdNewest = $found
+    $script:UpdState = $(if ($isNew) { "available" } else { "latest" })
+    Update-UpdateUi
+    if ($manual -and $isNew) { Start-Update; return }   # they asked: straight to "Update now?"
+    if ($first) {
+        Say "BloxKit $found is out (you have $BkVersion). Click 'Update to $found' at the top."
+        Show-MascotMoment "Attention" "BloxKit $found is out: click 'Update to $found' at the top." 8
+    } elseif ($manual) { Say "You have the newest BloxKit ($BkVersion)."; Show-MascotMoment "Success" "BloxKit $BkVersion is the newest." }
 }
 function Update-UpdateUi {
-    if ($script:UpdNewest -and $script:UpdNewest -gt [version]$BkVersion) { $ui.UpdateBtn.Content = "Update to $($script:UpdNewest)"; $ui.UpdateBtn.Background = Brush "Accent" }
+    $v = "v$BkVersion"; $dot = [string][char]0x00B7
+    switch ($script:UpdState) {
+        "checking"  { $t = "Checking for updates..."; $c = "Off"; $bg = "Raised"; $tip = "Asking GitHub for the newest BloxKit" }
+        "available" { $t = "Update to $($script:UpdNewest)"; $c = "Ink"; $bg = "Accent"; $tip = "BloxKit $($script:UpdNewest) is out (you have $BkVersion). Click to update: BloxKit closes, updates and opens again. Your accounts and settings stay." }
+        "latest"    { $t = "$v  $dot  up to date"; $c = "Success"; $bg = "Raised"; $tip = "You have the newest BloxKit. Click to check again." }
+        "off"       { $t = $v; $c = "Off"; $bg = "Raised"; $tip = "Test mode: no updates" }
+        default     { $t = "$v  $dot  check for updates"; $c = "Off"; $bg = "Raised"; $tip = "Click to check GitHub for a newer BloxKit" }
+    }
+    $ui.UpdatePillText.Text = $t; $ui.UpdatePillDot.Fill = Brush $c; $ui.UpdatePill.Background = Brush $bg; $ui.UpdatePill.ToolTip = $tip
+    [System.Windows.Automation.AutomationProperties]::SetName($ui.UpdatePill, $t)
+    if ($script:UpdState -eq "available") { $ui.UpdateBtn.Content = "Update to $($script:UpdNewest)"; $ui.UpdateBtn.Background = Brush "Accent" }
     else { $ui.UpdateBtn.Content = "Check for updates"; $ui.UpdateBtn.ClearValue([System.Windows.Controls.Control]::BackgroundProperty) }
 }
 function Start-Update {
@@ -6304,20 +6339,17 @@ function Start-Update {
     $script:ReallyExit = $true
     $win.Close()
 }
-$ui.UpdateBtn.Add_Click({
+function Invoke-UpdateClick {
+    # The header pill and the Settings button: update when there's one, otherwise check now.
     if ($NoRoblox) { Say "(test mode) no updates in test mode."; return }
-    if (-not $script:UpdNewest) {
-        # Not checked yet (or no answer): ask now, for up to 15 seconds.
-        Say "Checking GitHub for a newer BloxKit..."
-        Start-UpdateCheck
-        $sw = [Diagnostics.Stopwatch]::StartNew()
-        while ($script:UpdTask -and -not $script:UpdTask.IsCompleted -and $sw.ElapsedMilliseconds -lt 15000) { Start-Sleep -Milliseconds 100 }
-        Read-UpdateCheck
-        if (-not $script:UpdNewest) { Say "Couldn't reach GitHub to check for updates. Try again later."; return }
-    }
-    if ($script:UpdNewest -le [version]$BkVersion) { Say "You have the newest BloxKit ($BkVersion)."; Show-MascotMoment "Success" "BloxKit $BkVersion is the newest."; return }
-    Start-Update
-})
+    if ($script:UpdState -eq "available") { Start-Update; return }
+    if ($script:UpdState -eq "checking") { $script:UpdManual = $true; return }
+    $script:UpdManual = $true
+    Say "Checking GitHub for a newer BloxKit..."
+    Start-UpdateCheck   # the answer comes in on the timer, in a second or two
+}
+$ui.UpdateBtn.Add_Click({ Invoke-UpdateClick })
+$ui.UpdatePill.Add_Click({ Invoke-UpdateClick })
 $ui.ImportBtn.Add_Click({ Import-Backup })
 
 # Window events
@@ -6374,6 +6406,7 @@ $Tick.Add_Tick({
     $script:TickCount++
     Update-Mascot   # the mascot and its line follow what's really happening
     if ($script:UpdTask) { Read-UpdateCheck }
+    if ($script:TickCount % 21600 -eq 0) { Start-UpdateCheck }   # and again every 6 hours while it's open
     if ($NoRoblox) {   # tests: no Roblox windows, only the schedule's clock
         if ($script:ShowSignal.WaitOne(0)) { Show-App }
         if (Test-PlanActive) { Invoke-Plan "tick"; if ($ui.TabSchedule.IsSelected) { Update-ScheduleLive } }
@@ -6513,7 +6546,8 @@ if (Test-Path -LiteralPath $UpdNote) {
         Show-MascotMoment "Celebrate" "Updated to BloxKit $($Matches[2])." 6
     } elseif ($t -match '^same') { Say "You already have the newest BloxKit ($BkVersion)." }
 }
-Start-UpdateCheck   # in the background; Settings > Help and feedback shows "Update to ..." when there's a newer one
+Update-UpdateUi
+Start-UpdateCheck   # in the background; the pill at the top says "Update to ..." when there's a newer one
 $Tick.Start()
 if ($script:PollKeys.Count -gt 0) {
     $Keys.Start()
