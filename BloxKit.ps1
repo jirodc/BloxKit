@@ -2627,7 +2627,7 @@ function Get-ThemeXaml {
 
                   <TextBlock Text="HOW IT SENDS INPUT" Style="{StaticResource Eyebrow}"/>
                   <RadioButton x:Name="ModeHidden" Margin="0,0,0,8">
-                    <TextBlock TextWrapping="Wrap" Text="Hidden, no flicker: each window gets the key off-screen for a moment, so nothing pops up. Waits for a 2-second pause in your typing."/>
+                    <TextBlock TextWrapping="Wrap" Text="Hidden, no flicker: each window gets the key off-screen for a moment, so nothing pops up. Roblox sometimes ignores one, so it does it twice, 1.5 sec apart. Waits for a 2-second pause in your typing."/>
                   </RadioButton>
                   <RadioButton x:Name="ModeQuick">
                     <TextBlock TextWrapping="Wrap" Text="Quick switch: each window comes to the front for a moment. Only runs after I've been away from the PC for 10 seconds. ('Click a spot' always works this way.)"/>
@@ -5221,25 +5221,48 @@ function Do-Jumps([switch]$Manual) {
     $visible = (-not $hidden) -or @($picks | Where-Object { $_.Act -eq "click" }).Count
     $need = $(if ($visible) { $IdleNeededMs } else { $HiddenIdleMs })
     if (-not $Manual -and [RbxCore]::IdleMs() -lt $need) { return $false }
-    $back = [RbxCore]::GetForegroundWindow()
     $t = Get-Date -Format "HH:mm"
+    $done = Invoke-AfkPass $picks $hidden
+    foreach ($p in $picks) { $p.W.LastJump = "$t $($AfkActionNames[$p.Act])"; Update-TileInfo $p.W }
+    if ($hidden) {
+        # Measured on Roblox: a hidden visit gets through about 3 times in 4, and when it doesn't,
+        # Roblox ignores the whole visit (more presses in it don't help). Visits fail on their
+        # own, so a second one 1.5 s later makes it about as sure as Quick switch.
+        $script:AfkAgain = @($picks | Where-Object { $_.Act -ne "click" })
+        if ($script:AfkAgain.Count) { $AfkAgainTimer.Start() }
+    }
+    $what = ($done | Group-Object | ForEach-Object { "$($_.Count) $($_.Name)" }) -join ", "
+    Say "Anti-AFK: $what ($($script:State.afkMode) mode)."
+    return $true
+}
+
+function Invoke-AfkPass($picks, [bool]$hidden) {
+    # One visit to each screen. Returns what was done.
+    $back = [RbxCore]::GetForegroundWindow()
     $done = @(); $stashed = @()
     try {
         foreach ($p in $picks) {
+            if (-not [RbxCore]::IsWindow($p.W.Handle)) { continue }
             $r = Invoke-AfkAction $p.W $p.Act $hidden $back
             if ($null -ne $r) { $stashed += @{ H = $p.W.Handle; R = $r } }
-            $p.W.LastJump = "$t $($AfkActionNames[$p.Act])"; $done += $AfkActionNames[$p.Act]
-            Update-TileInfo $p.W
+            $done += $AfkActionNames[$p.Act]
         }
     } finally {
         # Focus goes back first, then the windows come back, so none of them ever shows up front.
         if ([RbxCore]::IsWindow($back)) { [RbxCore]::ForceFront($back) }
         foreach ($s in $stashed) { [RbxCore]::Unstash($s.H, $s.R) }
     }
-    $what = ($done | Group-Object | ForEach-Object { "$($_.Count) $($_.Name)" }) -join ", "
-    Say "Anti-AFK: $what ($($script:State.afkMode) mode)."
-    return $true
+    return $done
 }
+$script:AfkAgain = @()
+$AfkAgainTimer = New-Object System.Windows.Threading.DispatcherTimer
+$AfkAgainTimer.Interval = [TimeSpan]::FromMilliseconds(1500)
+$AfkAgainTimer.Add_Tick({
+    # The second hidden visit, only if you're still not typing (otherwise the first one has to do).
+    $AfkAgainTimer.Stop()
+    $again = @($script:AfkAgain); $script:AfkAgain = @()
+    if ($again.Count -and $script:State.afkMode -eq "hidden" -and [RbxCore]::IdleMs() -ge 1000) { Invoke-AfkPass $again $true | Out-Null }
+})
 
 function Test-HiddenJump($w) {
     $ui.Tabs.SelectedItem = $ui.TabScreens
@@ -5248,12 +5271,11 @@ function Test-HiddenJump($w) {
     $r = [BkBox]::Show("Watch screen $(Label-Of $w) here on the Live screens tab.`n`nClick OK and don't touch the keyboard for a few seconds. It will do these the hidden way (off-screen, nothing pops up), one by one: $names.", "Test anti-AFK", "OKCancel", "Information")
     if ($r -ne "OK") { return }
     Start-Sleep -Milliseconds 300
-    $back = [RbxCore]::GetForegroundWindow()
     foreach ($a in $acts) {
-        $s = Invoke-AfkAction $w $a $true $back
-        if ([RbxCore]::IsWindow($back)) { [RbxCore]::ForceFront($back) }
-        if ($null -ne $s) { [RbxCore]::Unstash($w.Handle, $s) }
-        Start-Sleep -Milliseconds 700
+        # Like a real round: a hidden visit, and a second one 1.5 s later (a click shows the window once).
+        Invoke-AfkPass @(@{ W = $w; Act = $a }) $true | Out-Null
+        if ($a -ne "click") { Start-Sleep -Milliseconds 1500; Invoke-AfkPass @(@{ W = $w; Act = $a }) $true | Out-Null }
+        Start-Sleep -Milliseconds 900
     }
     Start-Sleep -Milliseconds 500
     $ans = [BkBox]::Show("Did screen $(Label-Of $w) react ($names)?", "Test anti-AFK", "YesNo", "Question")

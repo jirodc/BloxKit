@@ -164,7 +164,7 @@ Click spot: on a screen, **...** > **Set click spot**, then click the place on t
 
 **How it sends the input.** Roblox only takes real key presses, and only in its focused window, so every mode gives the window the focus for a moment:
 
-- **Hidden, no flicker:** each window is moved just past the edge of your screens, gets the focus and the key there, and goes back once the window you were using has the focus again (about a third of a second). Nothing pops up, and the live screens keep showing it. It waits for a 2-second pause in your typing, so your keys don't end up in Roblox.
+- **Hidden, no flicker:** each window is moved just past the edge of your screens, gets the focus and the key there, and goes back once the window you were using has the focus again (about a third of a second). Nothing pops up, and the live screens keep showing it. Measured on a real game, Roblox takes about 3 in 4 hidden visits (and the visible switch about 9 in 10), so hidden mode visits each window twice, 1.5 seconds apart, which brings it about level with Quick switch. It waits for a 2-second pause in your typing, so your keys don't end up in Roblox.
 - **Quick switch:** each window comes to the front for a moment. It only runs after you've been away from the PC for 10 seconds.
 - **Click a spot** always works the Quick switch way (it moves the real mouse pointer, which can't click off-screen).
 
