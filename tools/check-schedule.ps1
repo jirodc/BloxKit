@@ -1,7 +1,7 @@
-# Checks Roblox Manager's group schedule: timers, moving on to the next group, pause/stop,
+# Checks BloxKit's group schedule: timers, moving on to the next group, pause/stop,
 # retries, and coming back after a restart. Uses a fake clock, so 2 hours take no time.
 #     powershell -ExecutionPolicy Bypass -File tools\check-schedule.ps1
-. (Join-Path $PSScriptRoot "..\RobloxManager.ps1") -TestOnly
+. (Join-Path $PSScriptRoot "..\BloxKit.ps1") -TestOnly
 
 $script:fails = 0
 $ErrorActionPreference = "Stop"

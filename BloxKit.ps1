@@ -60,7 +60,7 @@ function Get-SafeName([string]$s) {
 function Add-Marker([string]$url, [bool]$auto, [string]$job = "", [string]$place = "", [string]$op = "", [int]$port = 0) {
     # The auto-click helper only acts on links that end with this marker.
     # job/place = a server to rejoin (the helper calls joinGameInstance).
-    # op/port   = this launch's id and where Roblox Manager answers, so the helper (2.2+)
+    # op/port   = this launch's id and where BloxKit answers, so the helper (2.2+)
     #             can close the launch tab once the launch is confirmed.
     if (-not $url -or $url -match '#') { return $url }
     $parts = @()
@@ -102,6 +102,7 @@ function New-Defaults {
         afkMinutes    = 5
         afkMode       = "hidden"
         afkOn         = $false      # the anti-AFK switch, as it was when the app closed
+        animations    = $true       # startup intro, page changes, mascot reactions (also off when Windows' animations are off)
         afkOff        = @()         # lower-case nicks whose screen has its AFK tick off
         afkSkipActive = $true
         afkJitter     = $true
@@ -199,7 +200,7 @@ function ConvertTo-State($s) {
         $n = 0
         if ($null -ne $s.$p -and [int]::TryParse("" + $s.$p, [ref]$n) -and $n -gt 0) { $state.$p = $n }
     }
-    foreach ($p in "autoJoin","rejoinSameServer","alertSound","autoRejoin","autoMuteAlts","trayOnMinimize","afkSkipActive","afkJitter","discCheck","lowPower","ecoAlts","webhookOnDone","schedOn","afkOn","winMax") {
+    foreach ($p in "autoJoin","rejoinSameServer","alertSound","autoRejoin","autoMuteAlts","trayOnMinimize","afkSkipActive","afkJitter","discCheck","lowPower","ecoAlts","webhookOnDone","schedOn","afkOn","winMax","animations") {
         if ($null -ne $s.$p) { $state.$p = [bool]$s.$p }
     }
     $secs = @{}
@@ -395,7 +396,7 @@ function Read-BackupFile([string]$path, $current, [string]$chromeData, $profileN
     # this PC gets a fresh profile and is marked "needs sign-in".
     try { $s = [IO.File]::ReadAllText($path) | ConvertFrom-Json } catch { return @{ Ok = $false; Error = "The file couldn't be read: $($_.Exception.Message)" } }
     if ($s -isnot [System.Management.Automation.PSCustomObject] -or $null -eq $s.PSObject.Properties["accounts"]) {
-        return @{ Ok = $false; Error = "That file isn't a Roblox Manager backup." }
+        return @{ Ok = $false; Error = "That file isn't a BloxKit backup." }
     }
     $c = ConvertTo-State $s
     $state = $c.State; $warn = @($c.Warnings); $need = @()
@@ -759,7 +760,7 @@ function Get-StateFindings($x) {
     $out = @()
     if ($x.MultiWindowOff -and $x.RobloxRunning -gt 0) {
         $out += @{ Severity = "high"; Title = "Multi-window is off"; Nav = ""
-                   Seen = "Roblox was already running when Roblox Manager started ($($x.RobloxRunning) Roblox program(s) running now)."
+                   Seen = "Roblox was already running when BloxKit started ($($x.RobloxRunning) Roblox program(s) running now)."
                    Why = "New accounts take over the open Roblox window instead of getting their own."
                    Fix = "Close all Roblox (the orange 'Close Roblox and turn on' button at the top right). It turns on by itself once none are left." }
     }
@@ -864,7 +865,7 @@ function Get-LoadFindings($m) {
             "Cap it at 30: the Low resource preset, or in Roblox: Esc > Settings > Maximum Frame Rate."
     }
     if ($m.ManagerCpuPct -ge 5) {
-        $out += & $add "medium" "Roblox Manager itself is busy" ("It used {0:N1}% of the processor." -f $m.ManagerCpuPct) "It should use almost nothing." "Please tell the developer (and close the Live screens tab meanwhile)."
+        $out += & $add "medium" "BloxKit itself is busy" ("It used {0:N1}% of the processor." -f $m.ManagerCpuPct) "It should use almost nothing." "Please tell the developer (and close the Live screens tab meanwhile)."
     }
     $rank = @{ high = 0; medium = 1; info = 2 }
     return @($out | Sort-Object @{ Expression = { $rank[$_.Severity] } }, @{ Expression = { $_.No } })
@@ -1222,14 +1223,14 @@ function Test-HelperCanCloseTabs([string]$version) {
 }
 
 # ------------------------------------------------------------ tab closing --
-# The helper (2.2+) asks Roblox Manager, on this PC only, whether the launch that opened
+# The helper (2.2+) asks BloxKit, on this PC only, whether the launch that opened
 # its tab worked: GET http://127.0.0.1:<port>/launch/<id>?v=<helper version>
 # Answers: wait | close | keep | unknown. Only "close" closes that one tab.
 function Get-TabVerdict($op, [string]$winState, [DateTime]$now, [string]$closeWhen, [int]$maxAgeSec) {
     # -> @{ State = wait | close | keep | unknown; Why = what to tell you about it }
     # winState: what the launch's Roblox window is doing ("" = no window, or it closed again)
     $v = { param($s, $w) @{ State = $s; Why = $w } }
-    if (-not $op) { return & $v "unknown" "Roblox Manager doesn't know this launch (the app was restarted since)." }
+    if (-not $op) { return & $v "unknown" "BloxKit doesn't know this launch (the app was restarted since)." }
     if ($closeWhen -notin @("window", "connected")) { return & $v "keep" "Tab closing is off (Settings > Opening accounts)." }
     if ($op.Cancelled) { return & $v "keep" "The launch was cancelled." }
     $tooOld = ($now - $op.Start).TotalSeconds -gt $maxAgeSec
@@ -1326,8 +1327,8 @@ if (-not $gotLock) { [void]$script:ShowSignal.Set(); return }
 function Release-Instance { try { $script:InstanceLock.ReleaseMutex() } catch {} }
 
 trap {
-    [System.Windows.MessageBox]::Show("Sorry, something went wrong:`n`n$_", "Roblox Manager", "OK", "Error") | Out-Null
-    $global:RmlErrorShown = $true   # RobloxManager.exe then doesn't show a second box
+    [System.Windows.MessageBox]::Show("Sorry, something went wrong:`n`n$_", "BloxKit", "OK", "Error") | Out-Null
+    $global:RmlErrorShown = $true   # BloxKit.exe then doesn't show a second box
     break
 }
 
@@ -1835,373 +1836,425 @@ function Save-Session {
     $script:SessionDirty = $false
 }
 
+# ================================================================== THEME ==
+# The BloxKit look in one place. Colors are tokens: XAML uses {StaticResource Accent},
+# code uses Brush "Accent". Every window (the main one, dialogs, message boxes) gets
+# them, and the control styles below, from the application's resources.
+$BkTokens = [ordered]@{
+    # the brand palette
+    Midnight = "#0B0F14"; Slate = "#1F2937"; Accent = "#3B82F6"; Violet = "#8B5CF6"; Cloud = "#F8FAFC"
+    # surfaces: Midnight behind, Slate cards, shades of them for depth
+    Bg = "#0B0F14"; Nav = "#111720"; Surface = "#1F2937"; SurfaceAlt = "#263243"; Raised = "#2B3749"; Hover = "#334155"
+    Input = "#111827"; Line = "#2E3A4D"; LineStrong = "#475569"; ControlEdge = "#55657D"; Screen = "#000000"
+    # text on dark
+    Ink = "#F8FAFC"; InkSoft = "#CBD5E1"; Muted = "#94A3B8"; Subtle = "#8B9AB2"; Faint = "#64748B"
+    # interaction
+    AccentHover = "#60A5FA"; AccentSoft = "#1E3A66"; Focus = "#93C5FD"; VioletSoft = "#2E1F5E"
+    # status: always shown with a word or symbol too, never by color alone
+    Success = "#22C55E"; SuccessInk = "#4ADE80"; SuccessBg = "#12301F"; SuccessStrong = "#16A34A"
+    Warning = "#F59E0B"; WarningInk = "#FBBF24"; WarningBg = "#33260E"; WarnEdge = "#B7791F"
+    Caution = "#F97316"; CautionInk = "#FDBA74"; CautionBg = "#3A2412"; CautionStrong = "#C2410C"
+    Danger = "#EF4444"; DangerInk = "#F87171"; DangerSoftInk = "#FCA5A5"; DangerBg = "#3A1518"; DangerStrong = "#7F1D1D"
+    Star = "#FBBF24"; OnStar = "#111827"; Off = "#64748B"
+}
+# Motion, in ms. Short and subtle; everything is skipped when animations are off.
+$BkMotion = @{ Fast = 120; Base = 180; Slow = 280; Splash = 1150 }
+
+$ThemeStyles = @'
+  <FontFamily x:Key="Display">Segoe UI Variable Display, Segoe UI</FontFamily>
+  <LinearGradientBrush x:Key="BrandGradient" StartPoint="0,0" EndPoint="1,1"><GradientStop Offset="0" Color="{StaticResource C.Accent}"/><GradientStop Offset="1" Color="{StaticResource C.Violet}"/></LinearGradientBrush>
+  <LinearGradientBrush x:Key="BrandGradientH" StartPoint="0,0.5" EndPoint="1,0.5"><GradientStop Offset="0" Color="{StaticResource C.Accent}"/><GradientStop Offset="1" Color="{StaticResource C.Violet}"/></LinearGradientBrush>
+
+  <!-- Buttons: hover fades a light layer in, press darkens, keyboard focus gets a ring. -->
+  <Style x:Key="Btn" TargetType="Button">
+    <Setter Property="Foreground" Value="{StaticResource Ink}"/>
+    <Setter Property="Background" Value="{StaticResource Raised}"/>
+    <Setter Property="BorderBrush" Value="Transparent"/>
+    <Setter Property="Padding" Value="12,7"/>
+    <Setter Property="HorizontalContentAlignment" Value="Center"/>
+    <Setter Property="Cursor" Value="Hand"/>
+    <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="Button">
+          <Grid>
+            <Border x:Name="b" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1" CornerRadius="8"/>
+            <Border x:Name="hl" Background="#FFFFFF" Opacity="0" CornerRadius="8"/>
+            <Border x:Name="pr" Background="#000000" Opacity="0" CornerRadius="8"/>
+            <Border x:Name="ring" BorderBrush="{StaticResource Focus}" BorderThickness="2" CornerRadius="10" Margin="-3" Opacity="0"/>
+            <ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center" RecognizesAccessKey="True"/>
+          </Grid>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+              <Trigger.EnterActions><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetName="hl" Storyboard.TargetProperty="Opacity" To="0.08" Duration="0:0:0.12"/></Storyboard></BeginStoryboard></Trigger.EnterActions>
+              <Trigger.ExitActions><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetName="hl" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.18"/></Storyboard></BeginStoryboard></Trigger.ExitActions>
+            </Trigger>
+            <Trigger Property="IsPressed" Value="True"><Setter TargetName="pr" Property="Opacity" Value="0.18"/></Trigger>
+            <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="ring" Property="Opacity" Value="1"/></Trigger>
+            <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.42"/></Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+  <Style x:Key="BigBtn" TargetType="Button" BasedOn="{StaticResource Btn}">
+    <Setter Property="Background" Value="{StaticResource Accent}"/>
+    <Setter Property="FontSize" Value="15"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="Padding" Value="14,12"/>
+  </Style>
+  <!-- The one main action on a screen: the brand gradient. -->
+  <Style x:Key="PrimaryBtn" TargetType="Button" BasedOn="{StaticResource BigBtn}">
+    <Setter Property="Background" Value="{StaticResource BrandGradient}"/>
+  </Style>
+  <Style x:Key="GhostBtn" TargetType="Button" BasedOn="{StaticResource Btn}">
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="BorderBrush" Value="{StaticResource LineStrong}"/>
+  </Style>
+  <Style TargetType="Button" BasedOn="{StaticResource Btn}"/>   <!-- plain buttons (in dialogs) look the same -->
+  <Style TargetType="Window"><Setter Property="Background" Value="{StaticResource Surface}"/></Style>
+
+  <Style x:Key="Card" TargetType="Border">
+    <Setter Property="Background" Value="{StaticResource Surface}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource Line}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="CornerRadius" Value="14"/>
+    <Setter Property="Padding" Value="18"/>
+    <Setter Property="Margin" Value="0,0,0,12"/>
+  </Style>
+  <Style x:Key="Title" TargetType="TextBlock">
+    <Setter Property="Foreground" Value="{StaticResource Ink}"/>
+    <Setter Property="FontFamily" Value="{StaticResource Display}"/>
+    <Setter Property="FontSize" Value="17"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="Margin" Value="0,0,0,4"/>
+  </Style>
+  <Style x:Key="Eyebrow" TargetType="TextBlock">
+    <Setter Property="Foreground" Value="{StaticResource Subtle}"/>
+    <Setter Property="FontSize" Value="11"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="Margin" Value="0,14,0,6"/>
+  </Style>
+  <Style x:Key="Hint" TargetType="TextBlock">
+    <Setter Property="Foreground" Value="{StaticResource Muted}"/>
+    <Setter Property="FontSize" Value="13"/>
+    <Setter Property="TextWrapping" Value="Wrap"/>
+    <Setter Property="LineHeight" Value="19"/>
+  </Style>
+  <Style x:Key="Label" TargetType="TextBlock">
+    <Setter Property="Foreground" Value="{StaticResource InkSoft}"/>
+    <Setter Property="VerticalAlignment" Value="Center"/>
+  </Style>
+
+  <Style TargetType="TextBox">
+    <Setter Property="Background" Value="{StaticResource Input}"/>
+    <Setter Property="Foreground" Value="{StaticResource Ink}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource Line}"/>
+    <Setter Property="CaretBrush" Value="{StaticResource Ink}"/>
+    <Setter Property="SelectionBrush" Value="{StaticResource Accent}"/>
+    <Setter Property="Padding" Value="10,8"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="TextBox">
+          <Border x:Name="b" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1" CornerRadius="8">
+            <ScrollViewer x:Name="PART_ContentHost" VerticalAlignment="Center" Focusable="False" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Hidden"/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="{StaticResource LineStrong}"/></Trigger>
+            <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="{StaticResource Accent}"/></Trigger>
+            <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+  <Style TargetType="CheckBox">
+    <Setter Property="Foreground" Value="{StaticResource Ink}"/>
+    <Setter Property="Cursor" Value="Hand"/>
+    <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="CheckBox">
+          <Grid Background="Transparent">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+            <Border x:Name="box" Width="18" Height="18" CornerRadius="5" BorderThickness="1.5" BorderBrush="{StaticResource ControlEdge}" Background="{StaticResource Input}" VerticalAlignment="Top" Margin="0,1,0,0">
+              <Grid>
+                <Path x:Name="tick" Data="M3.5,8.5 L6.8,11.6 L12.6,5" Stroke="{StaticResource Ink}" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Visibility="Collapsed"/>
+                <Path x:Name="dash" Data="M4,8.2 L11,8.2" Stroke="{StaticResource Ink}" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Visibility="Collapsed"/>
+              </Grid>
+            </Border>
+            <ContentPresenter x:Name="cp" Grid.Column="1" Margin="9,0,0,0" VerticalAlignment="Top" RecognizesAccessKey="True"/>
+          </Grid>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="box" Property="BorderBrush" Value="{StaticResource AccentHover}"/></Trigger>
+            <Trigger Property="IsChecked" Value="True">
+              <Setter TargetName="box" Property="Background" Value="{StaticResource Accent}"/>
+              <Setter TargetName="box" Property="BorderBrush" Value="{StaticResource Accent}"/>
+              <Setter TargetName="tick" Property="Visibility" Value="Visible"/>
+            </Trigger>
+            <!-- some, not all (e.g. auto-click on for some accounts) -->
+            <Trigger Property="IsChecked" Value="{x:Null}">
+              <Setter TargetName="box" Property="Background" Value="{StaticResource Accent}"/>
+              <Setter TargetName="box" Property="BorderBrush" Value="{StaticResource Accent}"/>
+              <Setter TargetName="dash" Property="Visibility" Value="Visible"/>
+            </Trigger>
+            <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="box" Property="BorderBrush" Value="{StaticResource Focus}"/></Trigger>
+            <Trigger Property="HasContent" Value="False"><Setter TargetName="cp" Property="Margin" Value="0"/></Trigger>
+            <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+  <Style TargetType="RadioButton">
+    <Setter Property="Foreground" Value="{StaticResource Ink}"/>
+    <Setter Property="Cursor" Value="Hand"/>
+    <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="RadioButton">
+          <Grid Background="Transparent">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+            <Grid Width="18" Height="18" VerticalAlignment="Top" Margin="0,1,0,0">
+              <Ellipse x:Name="ring" Stroke="{StaticResource ControlEdge}" StrokeThickness="1.5" Fill="{StaticResource Input}"/>
+              <Ellipse x:Name="dot" Width="8" Height="8" Fill="{StaticResource Ink}" Visibility="Collapsed"/>
+            </Grid>
+            <ContentPresenter Grid.Column="1" Margin="9,0,0,0" VerticalAlignment="Top" RecognizesAccessKey="True"/>
+          </Grid>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ring" Property="Stroke" Value="{StaticResource AccentHover}"/></Trigger>
+            <Trigger Property="IsChecked" Value="True">
+              <Setter TargetName="ring" Property="Fill" Value="{StaticResource Accent}"/>
+              <Setter TargetName="ring" Property="Stroke" Value="{StaticResource Accent}"/>
+              <Setter TargetName="dot" Property="Visibility" Value="Visible"/>
+            </Trigger>
+            <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="ring" Property="Stroke" Value="{StaticResource Focus}"/></Trigger>
+            <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+  <Style TargetType="ComboBoxItem">
+    <Setter Property="Foreground" Value="{StaticResource Ink}"/>
+    <Setter Property="Cursor" Value="Hand"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="ComboBoxItem">
+          <Border x:Name="b" Background="Transparent" CornerRadius="6" Padding="10,7" Margin="2,1">
+            <ContentPresenter/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsHighlighted" Value="True"><Setter TargetName="b" Property="Background" Value="{StaticResource Hover}"/></Trigger>
+            <Trigger Property="IsSelected" Value="True"><Setter TargetName="b" Property="Background" Value="{StaticResource AccentSoft}"/></Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+  <Style TargetType="ComboBox">
+    <Setter Property="Foreground" Value="{StaticResource Ink}"/>
+    <Setter Property="Background" Value="{StaticResource Input}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource Line}"/>
+    <Setter Property="Padding" Value="10,7,30,7"/>
+    <Setter Property="Cursor" Value="Hand"/>
+    <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="ComboBox">
+          <Grid>
+            <ToggleButton x:Name="tg" Focusable="False" ClickMode="Press"
+                          IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+              <ToggleButton.Template>
+                <ControlTemplate TargetType="ToggleButton">
+                  <Border x:Name="b" Background="{StaticResource Input}" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="8">
+                    <Path HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,12,0" Data="M0,0 L4.5,4.5 L9,0"
+                          Stroke="{StaticResource Muted}" StrokeThickness="1.6" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                  </Border>
+                  <ControlTemplate.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="{StaticResource LineStrong}"/></Trigger>
+                    <Trigger Property="IsChecked" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="{StaticResource Accent}"/></Trigger>
+                  </ControlTemplate.Triggers>
+                </ControlTemplate>
+              </ToggleButton.Template>
+            </ToggleButton>
+            <Border x:Name="ring" BorderBrush="{StaticResource Focus}" BorderThickness="2" CornerRadius="10" Margin="-3" Opacity="0" IsHitTestVisible="False"/>
+            <ContentPresenter IsHitTestVisible="False" Margin="{TemplateBinding Padding}" VerticalAlignment="Center" HorizontalAlignment="Left"
+                              Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"/>
+            <Popup x:Name="PART_Popup" Placement="Bottom" IsOpen="{TemplateBinding IsDropDownOpen}" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
+              <Border Background="{StaticResource Raised}" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="10" Margin="0,4,0,0" Padding="3"
+                      MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}" MaxHeight="{TemplateBinding MaxDropDownHeight}">
+                <ScrollViewer VerticalScrollBarVisibility="Auto"><ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/></ScrollViewer>
+              </Border>
+            </Popup>
+          </Grid>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsKeyboardFocusWithin" Value="True"><Setter TargetName="ring" Property="Opacity" Value="1"/></Trigger>
+            <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+  <Style TargetType="ScrollBar">
+    <Setter Property="Width" Value="10"/>
+    <Setter Property="MinWidth" Value="10"/>
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="ScrollBar">
+          <Track x:Name="PART_Track" IsDirectionReversed="True" Orientation="{TemplateBinding Orientation}">
+            <Track.Thumb>
+              <Thumb>
+                <Thumb.Template>
+                  <ControlTemplate TargetType="Thumb">
+                    <Border x:Name="t" Background="{StaticResource Line}" CornerRadius="4" Margin="2"/>
+                    <ControlTemplate.Triggers>
+                      <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="t" Property="Background" Value="{StaticResource LineStrong}"/></Trigger>
+                    </ControlTemplate.Triggers>
+                  </ControlTemplate>
+                </Thumb.Template>
+              </Thumb>
+            </Track.Thumb>
+          </Track>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+    <Style.Triggers>
+      <Trigger Property="Orientation" Value="Horizontal">
+        <Setter Property="Width" Value="Auto"/>
+        <Setter Property="MinWidth" Value="0"/>
+        <Setter Property="Height" Value="10"/>
+      </Trigger>
+    </Style.Triggers>
+  </Style>
+
+  <!-- Progress: always a real amount (how many accounts opened, how much time is left). -->
+  <Style TargetType="ProgressBar">
+    <Setter Property="Foreground" Value="{StaticResource BrandGradientH}"/>
+    <Setter Property="Background" Value="{StaticResource Input}"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="ProgressBar">
+          <Grid>
+            <Border x:Name="PART_Track" Background="{TemplateBinding Background}" CornerRadius="4"/>
+            <Border x:Name="PART_Indicator" Background="{TemplateBinding Foreground}" CornerRadius="4" HorizontalAlignment="Left"/>
+          </Grid>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+  <Style TargetType="ToolTip">
+    <Setter Property="Foreground" Value="{StaticResource Ink}"/>
+    <Setter Property="MaxWidth" Value="360"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="ToolTip">
+          <Border Background="{StaticResource Raised}" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="8" Padding="10,6">
+            <ContentPresenter TextElement.Foreground="{StaticResource Ink}">
+              <ContentPresenter.Resources><Style TargetType="TextBlock"><Setter Property="TextWrapping" Value="Wrap"/></Style></ContentPresenter.Resources>
+            </ContentPresenter>
+          </Border>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+  <!-- Menus opened from code ("..." buttons) -->
+  <Style x:Key="DarkMenu" TargetType="ContextMenu">
+    <Setter Property="Foreground" Value="{StaticResource Ink}"/>
+    <Setter Property="FontSize" Value="14"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="ContextMenu">
+          <Border Background="{StaticResource Raised}" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="10" Padding="4" MinWidth="220">
+            <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Cycle"/>
+          </Border>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+  <Style x:Key="DarkItem" TargetType="MenuItem">
+    <Setter Property="Foreground" Value="{StaticResource Ink}"/>
+    <Setter Property="Cursor" Value="Hand"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="MenuItem">
+          <Border x:Name="b" Background="Transparent" CornerRadius="6" Padding="12,8">
+            <ContentPresenter ContentSource="Header" RecognizesAccessKey="True"/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsHighlighted" Value="True"><Setter TargetName="b" Property="Background" Value="{StaticResource Hover}"/></Trigger>
+            <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+  <!-- Navigation: the selected tab is lifted onto Slate with a blue-violet underline. -->
+  <Style TargetType="TabItem">
+    <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="TabItem">
+          <Grid Margin="0,0,4,0" Cursor="Hand">
+            <Border x:Name="tb" Background="Transparent" CornerRadius="9" Padding="16,8,16,10">
+              <ContentPresenter x:Name="cp" ContentSource="Header" TextElement.Foreground="{StaticResource Muted}" TextElement.FontSize="14" TextElement.FontWeight="SemiBold"/>
+            </Border>
+            <Border x:Name="bar" Height="3" CornerRadius="1.5" VerticalAlignment="Bottom" Margin="16,0,16,3" Background="{StaticResource BrandGradientH}" Opacity="0"/>
+            <Border x:Name="ring" BorderBrush="{StaticResource Focus}" BorderThickness="2" CornerRadius="9" Opacity="0"/>
+          </Grid>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+              <Setter TargetName="cp" Property="TextElement.Foreground" Value="{StaticResource Ink}"/>
+              <Setter TargetName="tb" Property="Background" Value="#0FFFFFFF"/>
+            </Trigger>
+            <Trigger Property="IsSelected" Value="True">
+              <Setter TargetName="tb" Property="Background" Value="{StaticResource Surface}"/>
+              <Setter TargetName="cp" Property="TextElement.Foreground" Value="{StaticResource Ink}"/>
+              <Setter TargetName="bar" Property="Opacity" Value="1"/>
+            </Trigger>
+            <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="ring" Property="Opacity" Value="1"/></Trigger>
+            <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.4"/></Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+  <Style TargetType="TabControl">
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="TabControl">
+          <DockPanel>
+            <Border DockPanel.Dock="Top" HorizontalAlignment="Left" Background="{StaticResource Nav}" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="12" Padding="4">
+              <TabPanel IsItemsHost="True" KeyboardNavigation.TabNavigation="Once" KeyboardNavigation.DirectionalNavigation="Cycle"/>
+            </Border>
+            <ContentPresenter x:Name="PART_SelectedContentHost" ContentSource="SelectedContent" Margin="{TemplateBinding Padding}"/>
+          </DockPanel>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+'@
+function Get-ThemeXaml {
+    $colors = foreach ($k in $BkTokens.Keys) { "  <Color x:Key=`"C.$k`">$($BkTokens[$k])</Color>`n  <SolidColorBrush x:Key=`"$k`" Color=`"$($BkTokens[$k])`"/>" }
+    "<ResourceDictionary xmlns=`"http://schemas.microsoft.com/winfx/2006/xaml/presentation`" xmlns:x=`"http://schemas.microsoft.com/winfx/2006/xaml`">`n" +
+        ($colors -join "`n") + "`n" + $ThemeStyles + "`n</ResourceDictionary>"
+}
+
 # --------------------------------------------------------------------- UI --
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Roblox Manager" Width="1280" Height="820" MinWidth="1000" MinHeight="640"
-        WindowStartupLocation="CenterScreen" Background="#0D0F13" Foreground="#E9ECF1"
+        Title="BloxKit" Width="1280" Height="820" MinWidth="1000" MinHeight="640"
+        WindowStartupLocation="CenterScreen" Background="{StaticResource Bg}" Foreground="{StaticResource Ink}"
         FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="14" UseLayoutRounding="True" TextOptions.TextFormattingMode="Display">
-  <Window.Resources>
-    <!-- Palette: cool slate neutrals, one blue accent, green/amber/red only for status. -->
-    <SolidColorBrush x:Key="Bg" Color="#0D0F13"/>
-    <SolidColorBrush x:Key="Surface" Color="#161A21"/>
-    <SolidColorBrush x:Key="Raised" Color="#1F242D"/>
-    <SolidColorBrush x:Key="Input" Color="#0F1217"/>
-    <SolidColorBrush x:Key="Line" Color="#2A303B"/>
-    <SolidColorBrush x:Key="LineStrong" Color="#414957"/>
-    <SolidColorBrush x:Key="Ink" Color="#E9ECF1"/>
-    <SolidColorBrush x:Key="Muted" Color="#98A2B3"/>
-    <SolidColorBrush x:Key="Accent" Color="#3D7BF7"/>
-    <FontFamily x:Key="Display">Segoe UI Variable Display, Segoe UI</FontFamily>
-
-    <!-- Buttons: hover brightens (never dims, which reads as disabled); keyboard focus gets a ring. -->
-    <Style x:Key="Btn" TargetType="Button">
-      <Setter Property="Foreground" Value="#E9ECF1"/>
-      <Setter Property="Background" Value="#252B35"/>
-      <Setter Property="BorderBrush" Value="Transparent"/>
-      <Setter Property="Padding" Value="12,7"/>
-      <Setter Property="HorizontalContentAlignment" Value="Center"/>
-      <Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
-      <Setter Property="Template">
-        <Setter.Value>
-          <ControlTemplate TargetType="Button">
-            <Grid>
-              <Border x:Name="b" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1" CornerRadius="8"/>
-              <Border x:Name="hl" Background="#FFFFFF" Opacity="0" CornerRadius="8"/>
-              <Border x:Name="ring" BorderBrush="#8DB3FF" BorderThickness="2" CornerRadius="8" Opacity="0"/>
-              <ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center" RecognizesAccessKey="True"/>
-            </Grid>
-            <ControlTemplate.Triggers>
-              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="hl" Property="Opacity" Value="0.07"/></Trigger>
-              <Trigger Property="IsPressed" Value="True"><Setter TargetName="hl" Property="Opacity" Value="0.14"/></Trigger>
-              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="ring" Property="Opacity" Value="1"/></Trigger>
-              <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.4"/></Trigger>
-            </ControlTemplate.Triggers>
-          </ControlTemplate>
-        </Setter.Value>
-      </Setter>
-    </Style>
-    <Style x:Key="BigBtn" TargetType="Button" BasedOn="{StaticResource Btn}">
-      <Setter Property="Background" Value="#3D7BF7"/>
-      <Setter Property="FontSize" Value="15"/>
-      <Setter Property="FontWeight" Value="SemiBold"/>
-      <Setter Property="Padding" Value="14,12"/>
-    </Style>
-    <Style x:Key="GhostBtn" TargetType="Button" BasedOn="{StaticResource Btn}">
-      <Setter Property="Background" Value="Transparent"/>
-      <Setter Property="BorderBrush" Value="#414957"/>
-    </Style>
-
-    <Style x:Key="Card" TargetType="Border">
-      <Setter Property="Background" Value="#161A21"/>
-      <Setter Property="BorderBrush" Value="#222833"/>
-      <Setter Property="BorderThickness" Value="1"/>
-      <Setter Property="CornerRadius" Value="12"/>
-      <Setter Property="Padding" Value="18"/>
-      <Setter Property="Margin" Value="0,0,0,12"/>
-    </Style>
-    <Style x:Key="Title" TargetType="TextBlock">
-      <Setter Property="Foreground" Value="#E9ECF1"/>
-      <Setter Property="FontFamily" Value="{StaticResource Display}"/>
-      <Setter Property="FontSize" Value="17"/>
-      <Setter Property="FontWeight" Value="SemiBold"/>
-      <Setter Property="Margin" Value="0,0,0,4"/>
-    </Style>
-    <Style x:Key="Eyebrow" TargetType="TextBlock">
-      <Setter Property="Foreground" Value="#7E8899"/>
-      <Setter Property="FontSize" Value="11"/>
-      <Setter Property="FontWeight" Value="SemiBold"/>
-      <Setter Property="Margin" Value="0,14,0,6"/>
-    </Style>
-    <Style x:Key="Hint" TargetType="TextBlock">
-      <Setter Property="Foreground" Value="#98A2B3"/>
-      <Setter Property="FontSize" Value="13"/>
-      <Setter Property="TextWrapping" Value="Wrap"/>
-      <Setter Property="LineHeight" Value="19"/>
-    </Style>
-    <Style x:Key="Label" TargetType="TextBlock">
-      <Setter Property="Foreground" Value="#C9D0DB"/>
-      <Setter Property="VerticalAlignment" Value="Center"/>
-    </Style>
-
-    <!-- Text boxes -->
-    <Style TargetType="TextBox">
-      <Setter Property="Background" Value="#0F1217"/>
-      <Setter Property="Foreground" Value="#E9ECF1"/>
-      <Setter Property="BorderBrush" Value="#2E3541"/>
-      <Setter Property="CaretBrush" Value="#E9ECF1"/>
-      <Setter Property="SelectionBrush" Value="#3D7BF7"/>
-      <Setter Property="Padding" Value="10,8"/>
-      <Setter Property="Template">
-        <Setter.Value>
-          <ControlTemplate TargetType="TextBox">
-            <Border x:Name="b" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1" CornerRadius="8">
-              <ScrollViewer x:Name="PART_ContentHost" VerticalAlignment="Center" Focusable="False"
-                            HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Hidden"/>
-            </Border>
-            <ControlTemplate.Triggers>
-              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="#414957"/></Trigger>
-              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="#3D7BF7"/></Trigger>
-            </ControlTemplate.Triggers>
-          </ControlTemplate>
-        </Setter.Value>
-      </Setter>
-    </Style>
-
-    <!-- Check boxes and radio buttons -->
-    <Style TargetType="CheckBox">
-      <Setter Property="Foreground" Value="#E9ECF1"/>
-      <Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
-      <Setter Property="Template">
-        <Setter.Value>
-          <ControlTemplate TargetType="CheckBox">
-            <Grid Background="Transparent">
-              <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-              <Border x:Name="box" Width="18" Height="18" CornerRadius="5" BorderThickness="1.5" BorderBrush="#4B5363" Background="#0F1217" VerticalAlignment="Top" Margin="0,1,0,0">
-                <Grid>
-                  <Path x:Name="tick" Data="M3.5,8.5 L6.8,11.6 L12.6,5" Stroke="White" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Visibility="Collapsed"/>
-                  <Path x:Name="dash" Data="M4,8.2 L11,8.2" Stroke="White" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Visibility="Collapsed"/>
-                </Grid>
-              </Border>
-              <ContentPresenter x:Name="cp" Grid.Column="1" Margin="9,0,0,0" VerticalAlignment="Top" RecognizesAccessKey="True"/>
-            </Grid>
-            <ControlTemplate.Triggers>
-              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="box" Property="BorderBrush" Value="#7A8496"/></Trigger>
-              <Trigger Property="IsChecked" Value="True">
-                <Setter TargetName="box" Property="Background" Value="#3D7BF7"/>
-                <Setter TargetName="box" Property="BorderBrush" Value="#3D7BF7"/>
-                <Setter TargetName="tick" Property="Visibility" Value="Visible"/>
-              </Trigger>
-              <!-- some, not all (e.g. auto-click on for some accounts) -->
-              <Trigger Property="IsChecked" Value="{x:Null}">
-                <Setter TargetName="box" Property="Background" Value="#3D7BF7"/>
-                <Setter TargetName="box" Property="BorderBrush" Value="#3D7BF7"/>
-                <Setter TargetName="dash" Property="Visibility" Value="Visible"/>
-              </Trigger>
-              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="box" Property="BorderBrush" Value="#8DB3FF"/></Trigger>
-              <Trigger Property="HasContent" Value="False"><Setter TargetName="cp" Property="Margin" Value="0"/></Trigger>
-              <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger>
-            </ControlTemplate.Triggers>
-          </ControlTemplate>
-        </Setter.Value>
-      </Setter>
-    </Style>
-    <Style TargetType="RadioButton">
-      <Setter Property="Foreground" Value="#E9ECF1"/>
-      <Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
-      <Setter Property="Template">
-        <Setter.Value>
-          <ControlTemplate TargetType="RadioButton">
-            <Grid Background="Transparent">
-              <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-              <Grid Width="18" Height="18" VerticalAlignment="Top" Margin="0,1,0,0">
-                <Ellipse x:Name="ring" Stroke="#4B5363" StrokeThickness="1.5" Fill="#0F1217"/>
-                <Ellipse x:Name="dot" Width="8" Height="8" Fill="White" Visibility="Collapsed"/>
-              </Grid>
-              <ContentPresenter Grid.Column="1" Margin="9,0,0,0" VerticalAlignment="Top" RecognizesAccessKey="True"/>
-            </Grid>
-            <ControlTemplate.Triggers>
-              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ring" Property="Stroke" Value="#7A8496"/></Trigger>
-              <Trigger Property="IsChecked" Value="True">
-                <Setter TargetName="ring" Property="Fill" Value="#3D7BF7"/>
-                <Setter TargetName="ring" Property="Stroke" Value="#3D7BF7"/>
-                <Setter TargetName="dot" Property="Visibility" Value="Visible"/>
-              </Trigger>
-              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="ring" Property="Stroke" Value="#8DB3FF"/></Trigger>
-            </ControlTemplate.Triggers>
-          </ControlTemplate>
-        </Setter.Value>
-      </Setter>
-    </Style>
-
-    <!-- Drop-downs -->
-    <Style TargetType="ComboBoxItem">
-      <Setter Property="Foreground" Value="#E9ECF1"/>
-      <Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="Template">
-        <Setter.Value>
-          <ControlTemplate TargetType="ComboBoxItem">
-            <Border x:Name="b" Background="Transparent" CornerRadius="6" Padding="10,7" Margin="2,1">
-              <ContentPresenter/>
-            </Border>
-            <ControlTemplate.Triggers>
-              <Trigger Property="IsHighlighted" Value="True"><Setter TargetName="b" Property="Background" Value="#2A313D"/></Trigger>
-              <Trigger Property="IsSelected" Value="True"><Setter TargetName="b" Property="Background" Value="#24365A"/></Trigger>
-            </ControlTemplate.Triggers>
-          </ControlTemplate>
-        </Setter.Value>
-      </Setter>
-    </Style>
-    <Style TargetType="ComboBox">
-      <Setter Property="Foreground" Value="#E9ECF1"/>
-      <Setter Property="Background" Value="#0F1217"/>
-      <Setter Property="BorderBrush" Value="#2E3541"/>
-      <Setter Property="Padding" Value="10,7,30,7"/>
-      <Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
-      <Setter Property="Template">
-        <Setter.Value>
-          <ControlTemplate TargetType="ComboBox">
-            <Grid>
-              <ToggleButton x:Name="tg" Focusable="False" ClickMode="Press"
-                            IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
-                <ToggleButton.Template>
-                  <ControlTemplate TargetType="ToggleButton">
-                    <Border x:Name="b" Background="#0F1217" BorderBrush="#2E3541" BorderThickness="1" CornerRadius="8">
-                      <Path HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,12,0" Data="M0,0 L4.5,4.5 L9,0"
-                            Stroke="#98A2B3" StrokeThickness="1.6" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
-                    </Border>
-                    <ControlTemplate.Triggers>
-                      <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="#414957"/></Trigger>
-                      <Trigger Property="IsChecked" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="#3D7BF7"/></Trigger>
-                    </ControlTemplate.Triggers>
-                  </ControlTemplate>
-                </ToggleButton.Template>
-              </ToggleButton>
-              <ContentPresenter IsHitTestVisible="False" Margin="{TemplateBinding Padding}" VerticalAlignment="Center" HorizontalAlignment="Left"
-                                Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"/>
-              <Popup x:Name="PART_Popup" Placement="Bottom" IsOpen="{TemplateBinding IsDropDownOpen}" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
-                <Border Background="#1F242D" BorderBrush="#343B48" BorderThickness="1" CornerRadius="8" Margin="0,4,0,0" Padding="2"
-                        MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}" MaxHeight="{TemplateBinding MaxDropDownHeight}">
-                  <ScrollViewer VerticalScrollBarVisibility="Auto"><ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/></ScrollViewer>
-                </Border>
-              </Popup>
-            </Grid>
-            <ControlTemplate.Triggers>
-              <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger>
-            </ControlTemplate.Triggers>
-          </ControlTemplate>
-        </Setter.Value>
-      </Setter>
-    </Style>
-
-    <!-- Thin dark scroll bars -->
-    <Style TargetType="ScrollBar">
-      <Setter Property="Width" Value="10"/>
-      <Setter Property="MinWidth" Value="10"/>
-      <Setter Property="Background" Value="Transparent"/>
-      <Setter Property="Template">
-        <Setter.Value>
-          <ControlTemplate TargetType="ScrollBar">
-            <Track x:Name="PART_Track" IsDirectionReversed="True" Orientation="{TemplateBinding Orientation}">
-              <Track.Thumb>
-                <Thumb>
-                  <Thumb.Template>
-                    <ControlTemplate TargetType="Thumb">
-                      <Border x:Name="t" Background="#343B48" CornerRadius="4" Margin="2"/>
-                      <ControlTemplate.Triggers>
-                        <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="t" Property="Background" Value="#4B5363"/></Trigger>
-                      </ControlTemplate.Triggers>
-                    </ControlTemplate>
-                  </Thumb.Template>
-                </Thumb>
-              </Track.Thumb>
-            </Track>
-          </ControlTemplate>
-        </Setter.Value>
-      </Setter>
-      <Style.Triggers>
-        <Trigger Property="Orientation" Value="Horizontal">
-          <Setter Property="Width" Value="Auto"/>
-          <Setter Property="MinWidth" Value="0"/>
-          <Setter Property="Height" Value="10"/>
-        </Trigger>
-      </Style.Triggers>
-    </Style>
-
-    <Style TargetType="ProgressBar">
-      <Setter Property="Template">
-        <Setter.Value>
-          <ControlTemplate TargetType="ProgressBar">
-            <Grid>
-              <Border x:Name="PART_Track" Background="{TemplateBinding Background}" CornerRadius="4"/>
-              <Border x:Name="PART_Indicator" Background="{TemplateBinding Foreground}" CornerRadius="4" HorizontalAlignment="Left"/>
-            </Grid>
-          </ControlTemplate>
-        </Setter.Value>
-      </Setter>
-    </Style>
-
-    <Style TargetType="ToolTip">
-      <Setter Property="Background" Value="#262C37"/>
-      <Setter Property="Foreground" Value="#E9ECF1"/>
-      <Setter Property="BorderBrush" Value="#343B48"/>
-      <Setter Property="Padding" Value="10,6"/>
-      <Setter Property="MaxWidth" Value="360"/>
-    </Style>
-
-    <!-- Menus opened from code ("..." buttons) -->
-    <Style x:Key="DarkMenu" TargetType="ContextMenu">
-      <Setter Property="Foreground" Value="#E9ECF1"/>
-      <Setter Property="FontSize" Value="14"/>
-      <Setter Property="Template">
-        <Setter.Value>
-          <ControlTemplate TargetType="ContextMenu">
-            <Border Background="#1F242D" BorderBrush="#343B48" BorderThickness="1" CornerRadius="6" Padding="4" MinWidth="220">
-              <StackPanel IsItemsHost="True"/>
-            </Border>
-          </ControlTemplate>
-        </Setter.Value>
-      </Setter>
-    </Style>
-    <Style x:Key="DarkItem" TargetType="MenuItem">
-      <Setter Property="Foreground" Value="#E9ECF1"/>
-      <Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="Template">
-        <Setter.Value>
-          <ControlTemplate TargetType="MenuItem">
-            <Border x:Name="b" Background="Transparent" CornerRadius="5" Padding="12,8">
-              <ContentPresenter ContentSource="Header" RecognizesAccessKey="True"/>
-            </Border>
-            <ControlTemplate.Triggers>
-              <Trigger Property="IsHighlighted" Value="True"><Setter TargetName="b" Property="Background" Value="#2A313D"/></Trigger>
-              <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger>
-            </ControlTemplate.Triggers>
-          </ControlTemplate>
-        </Setter.Value>
-      </Setter>
-    </Style>
-
-    <!-- Tabs: a segmented bar; the selected tab is lifted, not painted bright blue. -->
-    <Style TargetType="TabItem">
-      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
-      <Setter Property="Template">
-        <Setter.Value>
-          <ControlTemplate TargetType="TabItem">
-            <Border x:Name="tb" Background="Transparent" CornerRadius="8" Padding="18,8" Margin="0,0,4,0" Cursor="Hand">
-              <ContentPresenter x:Name="cp" ContentSource="Header" TextElement.Foreground="#98A2B3" TextElement.FontSize="14" TextElement.FontWeight="SemiBold"/>
-            </Border>
-            <ControlTemplate.Triggers>
-              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="cp" Property="TextElement.Foreground" Value="#E9ECF1"/></Trigger>
-              <Trigger Property="IsSelected" Value="True">
-                <Setter TargetName="tb" Property="Background" Value="#262C37"/>
-                <Setter TargetName="cp" Property="TextElement.Foreground" Value="#FFFFFF"/>
-              </Trigger>
-            </ControlTemplate.Triggers>
-          </ControlTemplate>
-        </Setter.Value>
-      </Setter>
-    </Style>
-    <Style TargetType="TabControl">
-      <Setter Property="Template">
-        <Setter.Value>
-          <ControlTemplate TargetType="TabControl">
-            <DockPanel>
-              <Border DockPanel.Dock="Top" HorizontalAlignment="Left" Background="#161A21" BorderBrush="#222833" BorderThickness="1" CornerRadius="11" Padding="4">
-                <TabPanel IsItemsHost="True"/>
-              </Border>
-              <ContentPresenter x:Name="PART_SelectedContentHost" ContentSource="SelectedContent" Margin="{TemplateBinding Padding}"/>
-            </DockPanel>
-          </ControlTemplate>
-        </Setter.Value>
-      </Setter>
-    </Style>
-  </Window.Resources>
-
+  <Grid x:Name="Root">
   <Grid Margin="16,14,16,14">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto"/>
@@ -2211,35 +2264,43 @@ function Save-Session {
     </Grid.RowDefinitions>
 
     <!-- Header: name on the left, live status pills on the right (visible from every tab) -->
-    <Grid Grid.Row="0" Margin="2,0,0,12">
-      <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-      <StackPanel VerticalAlignment="Center">
-        <TextBlock Text="Roblox Manager" Foreground="#FFFFFF" FontFamily="{StaticResource Display}" FontSize="22" FontWeight="SemiBold"/>
-        <TextBlock Text="Your accounts, live screens, and anti-AFK in one place." Style="{StaticResource Hint}"/>
+    <Grid Grid.Row="0" Margin="0,0,0,12">
+      <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+      <!-- The mascot shows how things are going; the line under the name says it in words. -->
+      <Grid x:Name="MascotBox" Width="60" Height="60" Margin="0,0,10,0" RenderTransformOrigin="0.5,0.9" AutomationProperties.Name="BloxKit mascot">
+        <Grid.RenderTransform><ScaleTransform x:Name="MascotScale"/></Grid.RenderTransform>
+        <Image x:Name="MascotA" Source="{DynamicResource Bk.Mascot.Default}"/>
+        <Image x:Name="MascotB" Opacity="0"/>
+      </Grid>
+      <StackPanel Grid.Column="1" VerticalAlignment="Center">
+        <Image Source="{DynamicResource Bk.Wordmark}" Height="25" HorizontalAlignment="Left" AutomationProperties.Name="BloxKit"/>
+        <TextBlock x:Name="MascotSays" Style="{StaticResource Hint}" Margin="1,5,0,0" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"
+                   Text="Your accounts, live screens and anti-AFK in one place."/>
       </StackPanel>
-      <Button x:Name="AfkPill" Grid.Column="1" Style="{StaticResource Btn}" Background="#1F242D" Padding="12,7" Margin="0,0,8,0" VerticalAlignment="Center"
+      <Button x:Name="AfkPill" Grid.Column="2" Style="{StaticResource Btn}" Background="{StaticResource Raised}" Padding="12,7" Margin="0,0,8,0" VerticalAlignment="Center"
               ToolTip="Turn anti-AFK on or off (Ctrl+Alt+A)">
         <StackPanel Orientation="Horizontal">
-          <Ellipse x:Name="AfkPillDot" Width="8" Height="8" Fill="#6B7280" VerticalAlignment="Center" Margin="0,0,8,0"/>
+          <Ellipse x:Name="AfkPillDot" Width="8" Height="8" Fill="{StaticResource Off}" VerticalAlignment="Center" Margin="0,0,8,0"/>
           <TextBlock x:Name="AfkPillText" Text="Anti-AFK off" FontWeight="SemiBold"/>
         </StackPanel>
       </Button>
-      <Border x:Name="StatusPill" Grid.Column="2" CornerRadius="8" Padding="12,7" VerticalAlignment="Center" Background="#163322">
+      <Border x:Name="StatusPill" Grid.Column="3" CornerRadius="8" Padding="12,7" VerticalAlignment="Center" Background="{StaticResource SuccessBg}">
         <StackPanel Orientation="Horizontal">
-          <Ellipse x:Name="StatusDot" Width="8" Height="8" Fill="#5BE38B" VerticalAlignment="Center" Margin="0,0,8,0"/>
-          <TextBlock x:Name="StatusText" Text="Multi-window ON" Foreground="#5BE38B" FontWeight="SemiBold"/>
+          <Ellipse x:Name="StatusDot" Width="8" Height="8" Fill="{StaticResource SuccessInk}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+          <TextBlock x:Name="StatusText" Text="Multi-window ON" Foreground="{StaticResource SuccessInk}" FontWeight="SemiBold"/>
         </StackPanel>
       </Border>
-      <Button x:Name="FixBtn" Grid.Column="3" Content="Close Roblox and turn on" Style="{StaticResource Btn}" Background="#C2410C" Margin="8,0,0,0" Visibility="Collapsed" VerticalAlignment="Center"/>
+      <Button x:Name="FixBtn" Grid.Column="4" Content="Close Roblox and turn on" Style="{StaticResource Btn}" Background="{StaticResource CautionStrong}" Margin="8,0,0,0" Visibility="Collapsed" VerticalAlignment="Center"/>
     </Grid>
 
-    <!-- Alert banner (kicks / crashes) -->
-    <Border x:Name="AlertBar" Grid.Row="1" Background="#7F1D1D" CornerRadius="10" Padding="14,10" Margin="0,0,0,10" Visibility="Collapsed">
+    <!-- Alert banner (kicks / crashes): restrained red, a clear message, and the way to fix it -->
+    <Border x:Name="AlertBar" Grid.Row="1" Background="{StaticResource DangerBg}" BorderBrush="{StaticResource Danger}" BorderThickness="1" CornerRadius="12" Padding="10,8,12,8" Margin="0,0,0,10" Visibility="Collapsed">
       <Grid>
-        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-        <TextBlock x:Name="AlertText" Foreground="White" FontWeight="SemiBold" VerticalAlignment="Center" TextWrapping="Wrap"/>
-        <Button x:Name="AlertRejoinBtn" Grid.Column="1" Content="Rejoin" Style="{StaticResource Btn}" Background="#16A34A" Margin="10,0,0,0"/>
-        <Button x:Name="AlertCloseBtn" Grid.Column="2" Content="Dismiss" Style="{StaticResource Btn}" Margin="8,0,0,0"/>
+        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+        <Image Source="{DynamicResource Bk.Mascot.Error}" Width="40" Height="40" Margin="0,0,10,0" VerticalAlignment="Center"/>
+        <TextBlock x:Name="AlertText" Grid.Column="1" Foreground="{StaticResource Ink}" FontWeight="SemiBold" VerticalAlignment="Center" TextWrapping="Wrap"/>
+        <Button x:Name="AlertRejoinBtn" Grid.Column="2" Content="Rejoin" Style="{StaticResource Btn}" Background="{StaticResource SuccessStrong}" Margin="10,0,0,0" VerticalAlignment="Center"/>
+        <Button x:Name="AlertCloseBtn" Grid.Column="3" Content="Dismiss" Style="{StaticResource Btn}" Margin="8,0,0,0" VerticalAlignment="Center"/>
       </Grid>
     </Border>
 
@@ -2264,13 +2325,17 @@ function Save-Session {
                 </Grid>
               </StackPanel>
               <WrapPanel DockPanel.Dock="Bottom" Margin="0,10,0,0">
-                <Button x:Name="AddBtn" Content="+  Add account" Style="{StaticResource Btn}" Background="#3D7BF7" Margin="0,0,8,0"/>
+                <Button x:Name="AddBtn" Content="+  Add account" Style="{StaticResource Btn}" Background="{StaticResource Accent}" Margin="0,0,8,0"/>
                 <Button x:Name="TickAltsBtn" Content="Tick all alts" Style="{StaticResource Btn}" Margin="0,0,8,0"/>
                 <Button x:Name="UntickBtn" Content="Untick all" Style="{StaticResource Btn}"/>
               </WrapPanel>
               <Grid>
                 <ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel x:Name="AccountList"/></ScrollViewer>
-                <TextBlock x:Name="EmptyText" Text="No accounts yet. Click &quot;+ Add account&quot; to start with your main." Style="{StaticResource Hint}" VerticalAlignment="Top" Margin="0,4,0,0"/>
+                <StackPanel x:Name="EmptyText" VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="340" Margin="0,0,0,20">
+                  <Image Source="{DynamicResource Bk.Mascot.Wave1}" Width="132" Height="132"/>
+                  <TextBlock Text="No accounts yet" Style="{StaticResource Title}" HorizontalAlignment="Center" Margin="0,6,0,4"/>
+                  <TextBlock Text="Click &quot;+ Add account&quot; to start with your main." Style="{StaticResource Hint}" TextAlignment="Center"/>
+                </StackPanel>
               </Grid>
             </DockPanel>
           </Border>
@@ -2282,8 +2347,8 @@ function Save-Session {
                   <TextBlock Text="Where should they go?" Style="{StaticResource Title}"/>
                   <TextBlock Text="Paste a game, private server, or profile link." Style="{StaticResource Hint}" Margin="0,0,0,8"/>
                   <Grid>
-                    <TextBox x:Name="LinkBox" Background="#0F1217" Foreground="White" BorderBrush="#2E3541" Padding="10,9" CaretBrush="White"/>
-                    <TextBlock x:Name="LinkPlaceholder" Text="https://www.roblox.com/games/..." Foreground="#5D6573" Margin="12,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False"/>
+                    <TextBox x:Name="LinkBox" Background="{StaticResource Input}" Foreground="{StaticResource Ink}" BorderBrush="{StaticResource Line}" Padding="10,9" CaretBrush="{StaticResource Ink}"/>
+                    <TextBlock x:Name="LinkPlaceholder" Text="https://www.roblox.com/games/..." Foreground="{StaticResource Faint}" Margin="12,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False"/>
                   </Grid>
                   <TextBlock x:Name="LinkStatus" Style="{StaticResource Hint}" Margin="2,6,0,0"/>
                   <WrapPanel Margin="0,8,0,0">
@@ -2299,7 +2364,7 @@ function Save-Session {
                     <Button x:Name="DelFavBtn" Grid.Column="3" Content="Delete" Style="{StaticResource Btn}" Margin="8,0,0,0"/>
                   </Grid>
                   <CheckBox x:Name="AutoJoinBox" Margin="0,12,0,0">
-                    <TextBlock TextWrapping="Wrap" Foreground="White" Text="Auto-click Play / Join for all accounts (a dash = some; set each one in Settings &gt; Chrome setup)"/>
+                    <TextBlock TextWrapping="Wrap" Foreground="{StaticResource Ink}" Text="Auto-click Play / Join for all accounts (a dash = some; set each one in Settings &gt; Chrome setup)"/>
                   </CheckBox>
                   <StackPanel x:Name="SpreadPanel" Margin="0,12,0,0">
                     <Grid>
@@ -2316,17 +2381,17 @@ function Save-Session {
                 <StackPanel>
                   <TextBlock Text="Open" Style="{StaticResource Title}"/>
                   <TextBlock x:Name="OpenHint" Style="{StaticResource Hint}" Margin="0,0,0,10" Text="Accounts open one at a time. Each one waits for the last to load first."/>
-                  <Button x:Name="StartAllBtn" Content="Start everything" Style="{StaticResource BigBtn}" Background="#16A34A" Padding="14,14" FontSize="16" Margin="0,0,0,4"/>
+                  <Button x:Name="StartAllBtn" Content="Start everything" Style="{StaticResource PrimaryBtn}" Padding="14,14" FontSize="16" Margin="0,0,0,4"/>
                   <TextBlock Text="Opens your main first. When it's in the game, every alt follows it." Style="{StaticResource Hint}" HorizontalAlignment="Center" Margin="0,0,0,12"/>
-                  <Button x:Name="OpenTickedBtn" Content="Open ticked accounts" Style="{StaticResource BigBtn}" Background="#252B35" Margin="0,0,0,8"/>
-                  <Button x:Name="OpenAltsBtn" Content="Open ALL alts" Style="{StaticResource BigBtn}" Background="Transparent" BorderBrush="#414957"/>
-                  <Border x:Name="ProgressCard" Background="#1D222A" CornerRadius="10" Padding="12" Margin="0,12,0,0" Visibility="Collapsed">
+                  <Button x:Name="OpenTickedBtn" Content="Open ticked accounts" Style="{StaticResource BigBtn}" Background="{StaticResource Raised}" Margin="0,0,0,8"/>
+                  <Button x:Name="OpenAltsBtn" Content="Open ALL alts" Style="{StaticResource BigBtn}" Background="Transparent" BorderBrush="{StaticResource LineStrong}"/>
+                  <Border x:Name="ProgressCard" Background="{StaticResource SurfaceAlt}" CornerRadius="10" Padding="12" Margin="0,12,0,0" Visibility="Collapsed">
                     <StackPanel>
-                      <TextBlock x:Name="ProgressText" Foreground="White" TextWrapping="Wrap"/>
-                      <ProgressBar x:Name="ProgressBar" Height="8" Margin="0,8,0,8" Minimum="0" Maximum="1" Foreground="#3D7BF7" Background="#0F1217" BorderThickness="0"/>
+                      <TextBlock x:Name="ProgressText" Foreground="{StaticResource Ink}" TextWrapping="Wrap"/>
+                      <ProgressBar x:Name="ProgressBar" Height="8" Margin="0,8,0,8" Minimum="0" Maximum="1" Foreground="{StaticResource Accent}" Background="{StaticResource Input}" BorderThickness="0"/>
                       <WrapPanel>
                         <Button x:Name="CancelBtn" Content="Cancel" Style="{StaticResource Btn}" Margin="0,0,8,0"/>
-                        <Button x:Name="RetryBtn" Content="Retry the ones that didn't load" Style="{StaticResource Btn}" Background="#C2410C" Visibility="Collapsed"/>
+                        <Button x:Name="RetryBtn" Content="Retry the ones that didn't load" Style="{StaticResource Btn}" Background="{StaticResource CautionStrong}" Visibility="Collapsed"/>
                       </WrapPanel>
                     </StackPanel>
                   </Border>
@@ -2353,13 +2418,16 @@ function Save-Session {
                 <TextBlock Text="Pick a group to see who's in it." Style="{StaticResource Hint}" Margin="0,0,0,10"/>
               </StackPanel>
               <WrapPanel DockPanel.Dock="Bottom" Margin="0,10,0,0">
-                <Button x:Name="GNewBtn" Content="+  New group" Style="{StaticResource Btn}" Background="#3D7BF7" Margin="0,0,8,6"/>
+                <Button x:Name="GNewBtn" Content="+  New group" Style="{StaticResource Btn}" Background="{StaticResource Accent}" Margin="0,0,8,6"/>
                 <Button x:Name="GUpBtn" Content="Move up" Style="{StaticResource Btn}" Margin="0,0,8,6" ToolTip="Move the picked group up the list"/>
                 <Button x:Name="GDownBtn" Content="Move down" Style="{StaticResource Btn}" Margin="0,0,0,6" ToolTip="Move the picked group down the list"/>
               </WrapPanel>
               <Grid>
                 <ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel x:Name="GroupList"/></ScrollViewer>
-                <TextBlock x:Name="GroupEmpty" Text="No groups yet. Click &quot;+ New group&quot;, or tick accounts on the Accounts tab and click &quot;Save ticked as group&quot;." Style="{StaticResource Hint}" VerticalAlignment="Top"/>
+                <StackPanel x:Name="GroupEmpty" VerticalAlignment="Top" Margin="0,8,0,0">
+                  <Image Source="{DynamicResource Bk.Mascot.Idle}" Width="88" Height="88" HorizontalAlignment="Left"/>
+                  <TextBlock Text="No groups yet. Click &quot;+ New group&quot;, or tick accounts on the Accounts tab and click &quot;Save ticked as group&quot;." Style="{StaticResource Hint}" Margin="0,6,0,0"/>
+                </StackPanel>
               </Grid>
             </DockPanel>
           </Border>
@@ -2375,11 +2443,11 @@ function Save-Session {
                 <WrapPanel Grid.Column="1" VerticalAlignment="Top">
                   <Button x:Name="GRenameBtn" Content="Rename" Style="{StaticResource Btn}" Margin="8,0,0,6"/>
                   <Button x:Name="GCopyBtn" Content="Duplicate" Style="{StaticResource Btn}" Margin="8,0,0,6"/>
-                  <Button x:Name="GDeleteBtn" Content="Delete" Style="{StaticResource Btn}" Background="#7F1D1D" Margin="8,0,0,6"/>
+                  <Button x:Name="GDeleteBtn" Content="Delete" Style="{StaticResource Btn}" Background="{StaticResource DangerStrong}" Margin="8,0,0,6"/>
                 </WrapPanel>
               </Grid>
               <WrapPanel DockPanel.Dock="Bottom" Margin="0,10,0,0">
-                <Button x:Name="GEditBtn" Content="Edit members" Style="{StaticResource Btn}" Background="#3D7BF7"/>
+                <Button x:Name="GEditBtn" Content="Edit members" Style="{StaticResource Btn}" Background="{StaticResource Accent}"/>
               </WrapPanel>
               <Grid>
                 <ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel x:Name="GMemberList"/></ScrollViewer>
@@ -2392,9 +2460,9 @@ function Save-Session {
             <StackPanel>
               <TextBlock Text="Open this group" Style="{StaticResource Title}"/>
               <TextBlock x:Name="GOpenHint" Style="{StaticResource Hint}" Margin="0,0,0,10"/>
-              <Button x:Name="GOpenBtn" Content="Open members that aren't open" Style="{StaticResource BigBtn}" Background="#16A34A"/>
+              <Button x:Name="GOpenBtn" Content="Open members that aren't open" Style="{StaticResource PrimaryBtn}"/>
               <Button x:Name="GTickBtn" Content="Tick just these on the Accounts tab" Style="{StaticResource Btn}" Margin="0,8,0,0"/>
-              <TextBlock x:Name="GProblems" Style="{StaticResource Hint}" Foreground="#FBBF24" Margin="0,12,0,0"/>
+              <TextBlock x:Name="GProblems" Style="{StaticResource Hint}" Foreground="{StaticResource WarningInk}" Margin="0,12,0,0"/>
             </StackPanel>
           </Border>
         </Grid>
@@ -2419,13 +2487,16 @@ function Save-Session {
                 <Grid>
                   <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                   <ComboBox x:Name="SAddGroup" AutomationProperties.Name="Group to add"/>
-                  <Button x:Name="SAddBtn" Grid.Column="1" Content="+  Add" Style="{StaticResource Btn}" Background="#3D7BF7" Margin="8,0,0,0"/>
+                  <Button x:Name="SAddBtn" Grid.Column="1" Content="+  Add" Style="{StaticResource Btn}" Background="{StaticResource Accent}" Margin="8,0,0,0"/>
                 </Grid>
                 <TextBlock x:Name="SEditHint" Style="{StaticResource Hint}" Margin="0,8,0,0"/>
               </StackPanel>
               <Grid>
                 <ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel x:Name="SStepList"/></ScrollViewer>
-                <TextBlock x:Name="SStepEmpty" Text="No groups in the schedule yet. Pick one below and click '+ Add'." Style="{StaticResource Hint}" VerticalAlignment="Top"/>
+                <StackPanel x:Name="SStepEmpty" VerticalAlignment="Top" Margin="0,8,0,0">
+                  <Image Source="{DynamicResource Bk.Mascot.Idle}" Width="88" Height="88" HorizontalAlignment="Left"/>
+                  <TextBlock Text="No groups in the schedule yet. Pick one below and click '+ Add'." Style="{StaticResource Hint}" Margin="0,6,0,0"/>
+                </StackPanel>
               </Grid>
             </DockPanel>
           </Border>
@@ -2434,22 +2505,22 @@ function Save-Session {
             <DockPanel>
               <StackPanel DockPanel.Dock="Top">
                 <TextBlock x:Name="SStateText" Style="{StaticResource Eyebrow}" Margin="0,0,0,4"/>
-                <TextBlock x:Name="SGroupText" Foreground="#FFFFFF" FontFamily="{StaticResource Display}" FontSize="22" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
-                <TextBlock x:Name="STimeText" Foreground="#FFFFFF" FontFamily="{StaticResource Display}" FontSize="40" FontWeight="SemiBold" Margin="0,4,0,0"/>
-                <ProgressBar x:Name="SProgress" Height="8" Margin="0,8,0,8" Minimum="0" Maximum="1" Foreground="#3D7BF7" Background="#0F1217" BorderThickness="0"/>
+                <TextBlock x:Name="SGroupText" Foreground="{StaticResource Ink}" FontFamily="{StaticResource Display}" FontSize="22" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                <TextBlock x:Name="STimeText" Foreground="{StaticResource Ink}" FontFamily="{StaticResource Display}" FontSize="40" FontWeight="SemiBold" Margin="0,4,0,0"/>
+                <ProgressBar x:Name="SProgress" Height="8" Margin="0,8,0,8" Minimum="0" Maximum="1" Foreground="{StaticResource Accent}" Background="{StaticResource Input}" BorderThickness="0"/>
                 <TextBlock x:Name="SNextText" Style="{StaticResource Hint}"/>
-                <TextBlock x:Name="SReasonText" Style="{StaticResource Hint}" Foreground="#FBBF24" Margin="0,4,0,0"/>
+                <TextBlock x:Name="SReasonText" Style="{StaticResource Hint}" Foreground="{StaticResource WarningInk}" Margin="0,4,0,0"/>
                 <WrapPanel Margin="0,12,0,0">
-                  <Button x:Name="SStartBtn" Content="Start" Style="{StaticResource BigBtn}" Background="#16A34A" Margin="0,0,8,8" MinWidth="110"/>
-                  <Button x:Name="SPauseBtn" Content="Pause" Style="{StaticResource BigBtn}" Background="#252B35" Margin="0,0,8,8" MinWidth="110"/>
-                  <Button x:Name="SNextBtn" Content="Next group" Style="{StaticResource BigBtn}" Background="#252B35" Margin="0,0,8,8"/>
-                  <Button x:Name="SStopBtn" Content="Stop" Style="{StaticResource BigBtn}" Background="#7F1D1D" Margin="0,0,8,8" MinWidth="90"/>
+                  <Button x:Name="SStartBtn" Content="Start" Style="{StaticResource PrimaryBtn}" Margin="0,0,8,8" MinWidth="110"/>
+                  <Button x:Name="SPauseBtn" Content="Pause" Style="{StaticResource BigBtn}" Background="{StaticResource Raised}" Margin="0,0,8,8" MinWidth="110"/>
+                  <Button x:Name="SNextBtn" Content="Next group" Style="{StaticResource BigBtn}" Background="{StaticResource Raised}" Margin="0,0,8,8"/>
+                  <Button x:Name="SStopBtn" Content="Stop" Style="{StaticResource BigBtn}" Background="{StaticResource DangerStrong}" Margin="0,0,8,8" MinWidth="90"/>
                 </WrapPanel>
                 <TextBlock x:Name="SMembersText" Style="{StaticResource Hint}" Margin="0,4,0,0"/>
                 <TextBlock Text="HISTORY" Style="{StaticResource Eyebrow}"/>
               </StackPanel>
               <ScrollViewer VerticalScrollBarVisibility="Auto">
-                <TextBlock x:Name="SHistory" Foreground="#C9D0DB" FontSize="13" TextWrapping="Wrap" LineHeight="20"/>
+                <TextBlock x:Name="SHistory" Foreground="{StaticResource InkSoft}" FontSize="13" TextWrapping="Wrap" LineHeight="20"/>
               </ScrollViewer>
             </DockPanel>
           </Border>
@@ -2494,7 +2565,8 @@ function Save-Session {
           <Grid>
             <UniformGrid x:Name="Wall"/>
             <StackPanel x:Name="EmptyWall" VerticalAlignment="Center" HorizontalAlignment="Center">
-              <TextBlock Text="No Roblox windows yet" Foreground="White" FontSize="20" FontWeight="SemiBold" HorizontalAlignment="Center"/>
+              <Image Source="{DynamicResource Bk.Mascot.Idle}" Width="160" Height="160" Margin="0,0,0,8"/>
+              <TextBlock Text="No Roblox windows yet" Foreground="{StaticResource Ink}" FontFamily="{StaticResource Display}" FontSize="20" FontWeight="SemiBold" HorizontalAlignment="Center"/>
               <TextBlock Text="Open accounts in the Accounts tab. They'll show up here live, already named." Style="{StaticResource Hint}" HorizontalAlignment="Center" Margin="0,6,0,0"/>
             </StackPanel>
           </Grid>
@@ -2503,7 +2575,7 @@ function Save-Session {
               <Border Style="{StaticResource Card}">
                 <StackPanel>
                   <TextBlock Text="Your PC right now" Style="{StaticResource Title}"/>
-                  <TextBlock x:Name="PerfNowText" Foreground="#C9D0DB" FontSize="13" TextWrapping="Wrap" LineHeight="20" Text="Measuring..."/>
+                  <TextBlock x:Name="PerfNowText" Foreground="{StaticResource InkSoft}" FontSize="13" TextWrapping="Wrap" LineHeight="20" Text="Measuring..."/>
                   <StackPanel x:Name="TipsList" Margin="0,6,0,0"/>
                 </StackPanel>
               </Border>
@@ -2511,7 +2583,7 @@ function Save-Session {
                 <StackPanel>
                   <TextBlock Text="Anti-AFK" Style="{StaticResource Title}"/>
                   <Button x:Name="AfkToggle" Style="{StaticResource Btn}" Padding="12,14" FontSize="15" FontWeight="SemiBold" Margin="0,4,0,0"/>
-                  <TextBlock x:Name="AfkStatus" Foreground="#C9D0DB" Margin="2,8,0,0" TextWrapping="Wrap"/>
+                  <TextBlock x:Name="AfkStatus" Foreground="{StaticResource InkSoft}" Margin="2,8,0,0" TextWrapping="Wrap"/>
 
                   <TextBlock Text="WHAT IT DOES" Style="{StaticResource Eyebrow}"/>
                   <CheckBox x:Name="ActJump" Margin="0,0,0,8" Content="Jump  (Space)"/>
@@ -2555,20 +2627,20 @@ function Save-Session {
                   <WrapPanel Margin="0,4,0,0">
                     <Button x:Name="MuteAltsBtn" Content="Mute all alts" Style="{StaticResource Btn}" Margin="0,0,8,8"/>
                     <Button x:Name="UnmuteAllBtn" Content="Unmute all" Style="{StaticResource Btn}" Margin="0,0,8,8"/>
-                    <Button x:Name="CloseAllBtn" Content="Close all Roblox" Style="{StaticResource Btn}" Background="#7F1D1D" Margin="0,0,0,8"/>
+                    <Button x:Name="CloseAllBtn" Content="Close all Roblox" Style="{StaticResource Btn}" Background="{StaticResource DangerStrong}" Margin="0,0,0,8"/>
                   </WrapPanel>
                   <CheckBox x:Name="EcoBox" Margin="0,4,0,10">
                     <TextBlock TextWrapping="Wrap" Text="Efficiency mode for alts: Windows runs them on power-saving cores at lower priority. Your main, and the window you're playing, stay at full speed."/>
                   </CheckBox>
                   <CheckBox x:Name="LowPowerBox" Margin="0,0,0,0">
-                    <TextBlock TextWrapping="Wrap" Foreground="White" Text="Low-power mode: make alt windows small (PC runs cooler, alt screens look a bit blurry)"/>
+                    <TextBlock TextWrapping="Wrap" Foreground="{StaticResource Ink}" Text="Low-power mode: make alt windows small (PC runs cooler, alt screens look a bit blurry)"/>
                   </CheckBox>
                 </StackPanel>
               </Border>
               <Border Style="{StaticResource Card}">
                 <StackPanel>
                   <TextBlock Text="Hotkeys" Style="{StaticResource Title}"/>
-                  <TextBlock Style="{StaticResource Hint}" Foreground="#C9D0DB" xml:space="preserve">Ctrl+Alt+G      back to this app
+                  <TextBlock Style="{StaticResource Hint}" Foreground="{StaticResource InkSoft}" xml:space="preserve">Ctrl+Alt+G      back to this app
 Ctrl+Alt+1..9   play screen #1..#9
 Ctrl+Alt+J       anti-AFK now
 Ctrl+Alt+A       anti-AFK on / off</TextBlock>
@@ -2623,24 +2695,24 @@ Ctrl+Alt+A       anti-AFK on / off</TextBlock>
                 </Grid>
                 <TextBlock x:Name="PerfPresetHint" Style="{StaticResource Hint}" Margin="0,0,0,10"/>
                 <Grid Margin="0,0,0,8">
-                  <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="120"/></Grid.ColumnDefinitions>
+                  <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="150"/></Grid.ColumnDefinitions>
                   <TextBlock Text="Most Roblox windows at once" Style="{StaticResource Label}"/>
                   <ComboBox x:Name="MaxClientsBox" Grid.Column="1" AutomationProperties.Name="Most Roblox windows at once"/>
                 </Grid>
                 <TextBlock Text="ROBLOX GRAPHICS (EVERY CLIENT USES THE SAME)" Style="{StaticResource Eyebrow}"/>
                 <Grid Margin="0,0,0,8">
-                  <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="120"/></Grid.ColumnDefinitions>
+                  <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="150"/></Grid.ColumnDefinitions>
                   <TextBlock Text="Graphics quality" Style="{StaticResource Label}"/>
                   <ComboBox x:Name="RbxQualityBox" Grid.Column="1" AutomationProperties.Name="Roblox graphics quality"/>
                 </Grid>
                 <Grid Margin="0,0,0,8">
-                  <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="120"/></Grid.ColumnDefinitions>
+                  <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="150"/></Grid.ColumnDefinitions>
                   <TextBlock Text="Frame rate cap" Style="{StaticResource Label}"/>
                   <ComboBox x:Name="RbxFpsBox" Grid.Column="1" AutomationProperties.Name="Roblox frame rate cap"/>
                 </Grid>
                 <TextBlock x:Name="RbxNowText" Style="{StaticResource Hint}"/>
                 <WrapPanel Margin="0,8,0,0">
-                  <Button x:Name="RbxApplyBtn" Content="Save to Roblox" Style="{StaticResource Btn}" Background="#3D7BF7" Margin="0,0,8,0"/>
+                  <Button x:Name="RbxApplyBtn" Content="Save to Roblox" Style="{StaticResource Btn}" Background="{StaticResource Accent}" Margin="0,0,8,0"/>
                   <Button x:Name="RbxUndoBtn" Content="Undo" Style="{StaticResource Btn}" ToolTip="Put back Roblox's settings file from before the last 'Save to Roblox'"/>
                 </WrapPanel>
                 <TextBlock Style="{StaticResource Hint}" Margin="0,8,0,0" Text="These are Roblox's own settings (in Roblox: Esc &gt; Settings), in one file every client reads when it starts. Close all Roblox windows to change them. The old file is kept for Undo."/>
@@ -2665,23 +2737,26 @@ Ctrl+Alt+A       anti-AFK on / off</TextBlock>
                 <TextBlock Style="{StaticResource Hint}" Margin="0,0,0,10" Text="When a Roblox window closes by itself, you get a red alert with a Rejoin button."/>
                 <CheckBox x:Name="SoundBox" Margin="0,0,0,8" Content="Play a sound"/>
                 <CheckBox x:Name="AutoRejoinBox">
-                  <TextBlock TextWrapping="Wrap" Foreground="White" Text="Rejoin automatically (max 3 times in 10 minutes per account)"/>
+                  <TextBlock TextWrapping="Wrap" Foreground="{StaticResource Ink}" Text="Rejoin automatically (max 3 times in 10 minutes per account)"/>
                 </CheckBox>
                 <CheckBox x:Name="SameServerBox" Margin="0,10,0,0">
                   <TextBlock TextWrapping="Wrap" Text="Rejoin the same server when possible (needs the auto-join helper)"/>
                 </CheckBox>
                 <CheckBox x:Name="DiscBox" Margin="0,10,0,0">
-                  <TextBlock TextWrapping="Wrap" Foreground="White" Text="Watch for disconnects and kicks (reads Roblox's log files; for windows without a log it checks the screen every 30 sec)"/>
+                  <TextBlock TextWrapping="Wrap" Foreground="{StaticResource Ink}" Text="Watch for disconnects and kicks (reads Roblox's log files; for windows without a log it checks the screen every 30 sec)"/>
                 </CheckBox>
                 <TextBlock Style="{StaticResource Hint}" Margin="0,6,0,0" Text="It skips the window you're playing in, so the Esc menu won't set it off."/>
               </StackPanel>
             </Border>
             <Border Style="{StaticResource Card}" Width="420" Margin="0,0,12,12" VerticalAlignment="Top">
               <StackPanel>
-                <TextBlock Text="Sound, tray and files" Style="{StaticResource Title}"/>
-                <CheckBox x:Name="AutoMuteBox" Margin="0,6,0,8" Content="Mute alts automatically when they open"/>
+                <TextBlock Text="Look, sound, tray and files" Style="{StaticResource Title}"/>
+                <CheckBox x:Name="AnimBox" Margin="0,6,0,8">
+                  <TextBlock TextWrapping="Wrap" Text="Animations: the startup intro, page changes and the mascot's reactions (always off when Windows' own animations are off)"/>
+                </CheckBox>
+                <CheckBox x:Name="AutoMuteBox" Margin="0,0,0,8" Content="Mute alts automatically when they open"/>
                 <CheckBox x:Name="TrayBox" Margin="0,0,0,12">
-                  <TextBlock TextWrapping="Wrap" Foreground="White" Text="When I minimize, hide in the tray (by the clock). Anti-AFK keeps running."/>
+                  <TextBlock TextWrapping="Wrap" Foreground="{StaticResource Ink}" Text="When I minimize, hide in the tray (by the clock). Anti-AFK keeps running."/>
                 </CheckBox>
                 <Button x:Name="OpenFolderBtn" Content="Open settings folder" Style="{StaticResource Btn}" HorizontalAlignment="Left"/>
               </StackPanel>
@@ -2690,11 +2765,11 @@ Ctrl+Alt+A       anti-AFK on / off</TextBlock>
               <StackPanel>
                 <TextBlock Text="Phone alerts (Discord)" Style="{StaticResource Title}"/>
                 <TextBlock Style="{StaticResource Hint}" Margin="0,0,0,8" Text="Get a Discord message (on your phone too) when an account is kicked or didn't load. In Discord: Server Settings &gt; Integrations &gt; Webhooks &gt; New Webhook &gt; Copy Webhook URL. Paste it here."/>
-                <TextBox x:Name="HookBox" Background="#0F1217" Foreground="White" BorderBrush="#2E3541" Padding="8,7" CaretBrush="White"/>
+                <TextBox x:Name="HookBox" Background="{StaticResource Input}" Foreground="{StaticResource Ink}" BorderBrush="{StaticResource Line}" Padding="8,7" CaretBrush="{StaticResource Ink}"/>
                 <TextBlock x:Name="HookStatus" Style="{StaticResource Hint}" Margin="2,6,0,0"/>
                 <CheckBox x:Name="HookDoneBox" Margin="0,8,0,8" Content="Also tell me when accounts finish opening"/>
                 <WrapPanel>
-                  <Button x:Name="HookSaveBtn" Content="Save" Style="{StaticResource Btn}" Background="#3D7BF7" Margin="0,0,8,0"/>
+                  <Button x:Name="HookSaveBtn" Content="Save" Style="{StaticResource Btn}" Background="{StaticResource Accent}" Margin="0,0,8,0"/>
                   <Button x:Name="HookTestBtn" Content="Send a test message" Style="{StaticResource Btn}"/>
                 </WrapPanel>
               </StackPanel>
@@ -2705,16 +2780,16 @@ Ctrl+Alt+A       anti-AFK on / off</TextBlock>
                 <TextBlock Style="{StaticResource Hint}" Margin="0,0,0,8" Text="Runs 'Start everything' by itself every day. This app must be running (tip: tick 'Open when Windows starts')."/>
                 <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
                   <CheckBox x:Name="SchedBox" VerticalAlignment="Center" Content="Every day at"/>
-                  <TextBox x:Name="SchedTimeBox" Width="70" Margin="8,0,6,0" Background="#0F1217" Foreground="White" BorderBrush="#2E3541" Padding="6,4" CaretBrush="White" ToolTip="24-hour time, like 08:00 or 19:30"/>
+                  <TextBox x:Name="SchedTimeBox" Width="70" Margin="8,0,6,0" Background="{StaticResource Input}" Foreground="{StaticResource Ink}" BorderBrush="{StaticResource Line}" Padding="6,4" CaretBrush="{StaticResource Ink}" ToolTip="24-hour time, like 08:00 or 19:30"/>
                   <TextBlock Text="(24-hour, like 19:30)" Style="{StaticResource Label}"/>
                 </StackPanel>
-                <TextBlock x:Name="SchedLinkText" Style="{StaticResource Hint}" Foreground="#C9D0DB" Margin="0,0,0,8"/>
+                <TextBlock x:Name="SchedLinkText" Style="{StaticResource Hint}" Foreground="{StaticResource InkSoft}" Margin="0,0,0,8"/>
                 <WrapPanel>
                   <Button x:Name="SchedUseLinkBtn" Content="Use the link from the Accounts tab" Style="{StaticResource Btn}" Margin="0,0,8,0"/>
                 </WrapPanel>
                 <TextBlock x:Name="SchedStatus" Style="{StaticResource Hint}" Margin="2,8,0,0"/>
                 <CheckBox x:Name="StartupBox" Margin="0,12,0,0">
-                  <TextBlock TextWrapping="Wrap" Foreground="White" Text="Open Roblox Manager when Windows starts (it starts hidden in the tray)"/>
+                  <TextBlock TextWrapping="Wrap" Foreground="{StaticResource Ink}" Text="Open BloxKit when Windows starts (it starts hidden in the tray)"/>
                 </CheckBox>
               </StackPanel>
             </Border>
@@ -2723,7 +2798,7 @@ Ctrl+Alt+A       anti-AFK on / off</TextBlock>
                 <TextBlock Text="Backup" Style="{StaticResource Title}"/>
                 <TextBlock Style="{StaticResource Hint}" Margin="0,0,0,10" Text="Save your accounts, groups, saved links and settings to one file. Use it on a new PC. No passwords or logins are in it (Chrome keeps those), and your Discord webhook link is left out. On a new PC, the app walks you through signing in each account once."/>
                 <WrapPanel>
-                  <Button x:Name="ExportBtn" Content="Save backup file" Style="{StaticResource Btn}" Background="#3D7BF7" Margin="0,0,8,0"/>
+                  <Button x:Name="ExportBtn" Content="Save backup file" Style="{StaticResource Btn}" Background="{StaticResource Accent}" Margin="0,0,8,0"/>
                   <Button x:Name="ImportBtn" Content="Load backup file" Style="{StaticResource Btn}"/>
                 </WrapPanel>
               </StackPanel>
@@ -2732,7 +2807,7 @@ Ctrl+Alt+A       anti-AFK on / off</TextBlock>
               <StackPanel>
                 <TextBlock Text="Time online today" Style="{StaticResource Title}"/>
                 <TextBlock Style="{StaticResource Hint}" Margin="0,0,0,8" Text="How long each account has had a Roblox window open today. Resets at midnight."/>
-                <TextBlock x:Name="StatsText" Foreground="White" FontFamily="Consolas" TextWrapping="Wrap"/>
+                <TextBlock x:Name="StatsText" Foreground="{StaticResource Ink}" FontFamily="Consolas" TextWrapping="Wrap"/>
               </StackPanel>
             </Border>
           </WrapPanel>
@@ -2740,17 +2815,41 @@ Ctrl+Alt+A       anti-AFK on / off</TextBlock>
       </TabItem>
     </TabControl>
 
-    <Border Grid.Row="3" Background="#161A21" CornerRadius="8" Padding="12,8" Margin="0,10,0,0">
-      <TextBlock x:Name="Footer" Text="Ready." Foreground="#C9D0DB" TextWrapping="Wrap"/>
+    <Border Grid.Row="3" Background="{StaticResource Nav}" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="10" Padding="12,8" Margin="0,10,0,0">
+      <DockPanel>
+        <Ellipse x:Name="FooterDot" Width="7" Height="7" Fill="{StaticResource Accent}" Margin="0,0,10,0" VerticalAlignment="Center"/>
+        <TextBlock x:Name="Footer" Text="Ready." Foreground="{StaticResource InkSoft}" TextWrapping="Wrap" VerticalAlignment="Center"/>
+      </DockPanel>
     </Border>
+  </Grid>
+
+  <!-- Startup intro: over everything, never in the way (clicks go through), gone in about a second. -->
+  <Grid x:Name="Splash" Background="{StaticResource Bg}" IsHitTestVisible="False" Visibility="Collapsed">
+    <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+      <Grid x:Name="SplashArt" Width="210" Height="210" HorizontalAlignment="Center" Opacity="0">
+        <Grid.RenderTransform><TranslateTransform x:Name="SplashLift" Y="16"/></Grid.RenderTransform>
+        <Image Source="{DynamicResource Bk.Mascot.Idle}"/>
+        <Image x:Name="SplashLit" Source="{DynamicResource Bk.Mascot.Happy}" Opacity="0"/>
+      </Grid>
+      <Image x:Name="SplashWord" Source="{DynamicResource Bk.Wordmark}" Height="46" Margin="0,16,0,0" Opacity="0" AutomationProperties.Name="BloxKit"/>
+    </StackPanel>
+  </Grid>
   </Grid>
 </Window>
 '@
 
 $app = New-Object System.Windows.Application
 $app.ShutdownMode = "OnExplicitShutdown"
+$app.Resources = [Windows.Markup.XamlReader]::Parse((Get-ThemeXaml))
+# The mascot and logo (made by tools\build-brand.ps1). Without them the app still works, just without the art.
+$ArtFile = Join-Path $PSScriptRoot "assets\brand\BloxKit.Art.xaml"
+try {
+    $art = [Windows.Markup.XamlReader]::Parse([IO.File]::ReadAllText($ArtFile))
+    foreach ($k in @($art.Keys)) { $v = $art[$k]; if ($v -is [System.Windows.Freezable] -and $v.CanFreeze) { $v.Freeze() } }
+    $app.Resources.MergedDictionaries.Add($art)
+} catch {}
 $win = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
-$IconFile = Join-Path $PSScriptRoot "assets\RobloxManager.ico"
+$IconFile = Join-Path $PSScriptRoot "assets\BloxKit.ico"
 try { $win.Icon = [System.Windows.Media.Imaging.BitmapFrame]::Create((New-Object Uri $IconFile)) } catch {}   # taskbar and title bar
 $ui = @{}
 $xaml.SelectNodes("//*[@*[local-name()='Name']]") | ForEach-Object {
@@ -2758,8 +2857,204 @@ $xaml.SelectNodes("//*[@*[local-name()='Name']]") | ForEach-Object {
     if ($n) { $ui[$n.Value] = $win.FindName($n.Value) }
 }
 $BtnStyle = $win.FindResource("Btn")
-function Brush([string]$hex) { (New-Object System.Windows.Media.BrushConverter).ConvertFromString($hex) }
-function Say([string]$m) { $ui.Footer.Text = (Get-Date -Format "HH:mm") + "  " + $m }
+function Brush([string]$v) {
+    # A theme token ("Accent", "Muted", ...) or any color WPF understands ("Transparent", "#RRGGBB").
+    $r = $app.Resources[$v]
+    if ($r -is [System.Windows.Media.Brush]) { return $r }
+    (New-Object System.Windows.Media.BrushConverter).ConvertFromString($v)
+}
+
+# ---- motion: short, subtle, and off when the user (or Windows) turned animations off ----
+function Test-Motion { [bool]$script:State.animations -and [System.Windows.SystemParameters]::ClientAreaAnimation }
+function Set-Anim($el, $dp, [double]$to, [int]$ms, $from = $null, [int]$delay = 0, [scriptblock]$done = $null) {
+    # Animates one number (opacity, a move, a scale) with an ease-out; without motion it just jumps there.
+    if (-not (Test-Motion)) { $el.BeginAnimation($dp, $null); $el.SetValue($dp, $to); if ($done) { & $done }; return }
+    $a = New-Object System.Windows.Media.Animation.DoubleAnimation
+    $a.To = $to; if ($null -ne $from) { $a.From = [double]$from }
+    $a.Duration = [TimeSpan]::FromMilliseconds($ms); $a.BeginTime = [TimeSpan]::FromMilliseconds($delay)
+    $e = New-Object System.Windows.Media.Animation.CubicEase; $e.EasingMode = "EaseOut"; $a.EasingFunction = $e
+    if ($done) { $a.Add_Completed($done) }
+    $el.BeginAnimation($dp, $a)
+}
+$OpacityDP = [System.Windows.UIElement]::OpacityProperty
+
+function Say([string]$m) {
+    if (-not $ui.Footer) { return }
+    $ui.Footer.Text = (Get-Date -Format "HH:mm") + "  " + $m
+    # The dot only adds a tone; the words always say what happened.
+    $warn = $m -match "^(Couldn't|Can't|Sorry|Warning|Still blocked)|\b(failed|didn't load|didn't work|isn't|wasn't found|not found)\b"
+    $ui.FooterDot.Fill = Brush $(if ($warn) { "Warning" } else { "Accent" })
+    Set-Anim $ui.Footer $OpacityDP 1 200 0.35
+}
+
+# ---- the mascot: its look and the line under the name come from what the app is really doing ----
+$script:MascotNow = "Default"; $script:MascotMoment = $null; $script:MascotWave = 0
+function Set-MascotArt([string]$key) {
+    if ($script:MascotNow -eq $key) { return }
+    $src = $app.TryFindResource("Bk.Mascot.$key"); if (-not $src) { return }
+    $script:MascotNow = $key
+    if ($script:MascotWave -gt 0 -or -not (Test-Motion)) { $ui.MascotA.Source = $src; return }
+    $ui.MascotB.BeginAnimation($OpacityDP, $null); $ui.MascotB.Source = $ui.MascotA.Source; $ui.MascotB.Opacity = 1
+    $ui.MascotA.Source = $src
+    Set-Anim $ui.MascotB $OpacityDP 0 180
+    Set-Anim $ui.MascotScale ([System.Windows.Media.ScaleTransform]::ScaleXProperty) 1 240 0.92
+    Set-Anim $ui.MascotScale ([System.Windows.Media.ScaleTransform]::ScaleYProperty) 1 240 0.92
+}
+function Get-MascotState {
+    if ($script:MascotMoment -and [DateTime]::Now -lt $script:MascotMoment.Until) { return $script:MascotMoment }
+    $script:MascotMoment = $null
+    $n = @($script:Wins).Count
+    if ($ui.AlertBar.Visibility -eq "Visible") { return @{ Art = "Error"; Text = $ui.AlertText.Text } }
+    if ($script:QBusy) { return @{ Art = "Working"; Text = $(if ($ui.ProgressText.Text) { $ui.ProgressText.Text } else { "Opening accounts..." }) } }
+    if (-not $NoRoblox -and $script:Locks.Count -eq 0) { return @{ Art = "Attention"; Text = "Multi-window is off, so only one Roblox window can stay open." } }
+    if (@($script:State.accounts).Count -eq 0) { return @{ Art = "Default"; Text = "Hi! Add your first account to get started." } }
+    $wins = $(if ($n -eq 1) { "1 Roblox window" } else { "$n Roblox windows" })
+    if ($n -and $script:AfkOn) { return @{ Art = "Happy"; Text = "$wins open. Anti-AFK is keeping them online." } }
+    if ($n) { return @{ Art = "Default"; Text = "$wins open." } }
+    return @{ Art = "Idle"; Text = "Nothing running. Pick accounts and a game to start." }
+}
+function Show-MascotMoment([string]$art, [string]$text, [int]$sec = 4) {
+    # A short reaction to something that just happened (it goes back to the usual look after $sec).
+    $script:MascotMoment = @{ Art = $art; Text = $text; Until = [DateTime]::Now.AddSeconds($sec) }
+    Update-Mascot
+}
+function Update-Mascot {
+    if (-not $ui.MascotA) { return }
+    $s = Get-MascotState
+    if ($script:MascotWave -le 0) { Set-MascotArt $s.Art }
+    if ($ui.MascotSays.Text -ne $s.Text) { $ui.MascotSays.Text = $s.Text; $ui.MascotSays.ToolTip = $s.Text }
+    [System.Windows.Automation.AutomationProperties]::SetName($ui.MascotBox, "BloxKit: " + $s.Text)
+}
+$WaveTimer = New-Object System.Windows.Threading.DispatcherTimer
+$WaveTimer.Interval = [TimeSpan]::FromMilliseconds(260)
+$WaveTimer.Add_Tick({
+    # A short hello: the raised hand swings a few times, then the usual look comes back.
+    $script:MascotWave--
+    if ($script:MascotWave -le 0) { $WaveTimer.Stop(); $script:MascotNow = ""; Update-Mascot; return }
+    $ui.MascotA.Source = $app.TryFindResource($(if ($script:MascotWave % 2) { "Bk.Mascot.Wave2" } else { "Bk.Mascot.Wave1" }))
+})
+function Start-Wave { if (-not (Test-Motion) -or -not $app.TryFindResource("Bk.Mascot.Wave1")) { return }; $script:MascotWave = 7; $ui.MascotB.Opacity = 0; $WaveTimer.Start() }
+
+# ---- startup intro: the mascot rises in, its eyes light up, the name appears, then it fades into the app ----
+function Start-Intro {
+    if (-not (Test-Motion) -or $Minimized -or -not $app.TryFindResource("Bk.Mascot.Idle")) { return }
+    $ui.Splash.Visibility = "Visible"; $ui.Splash.Opacity = 1
+    Set-Anim $ui.SplashArt $OpacityDP 1 320 0
+    Set-Anim $ui.SplashLift ([System.Windows.Media.TranslateTransform]::YProperty) 0 420 16
+    Set-Anim $ui.SplashLit $OpacityDP 1 260 0 340
+    Set-Anim $ui.SplashWord $OpacityDP 1 300 0 460
+    Set-Anim $ui.Splash $OpacityDP 0 280 1 $BkMotion.Splash { $ui.Splash.Visibility = "Collapsed"; Start-Wave }
+}
+
+# ---- page changes: the new page fades in with a small lift ----
+$ui.Tabs.Add_SelectionChanged({
+    param($s, $e)
+    if ($e.OriginalSource -ne $ui.Tabs -or -not (Test-Motion)) { return }
+    $c = $ui.Tabs.SelectedContent
+    if ($c -isnot [System.Windows.UIElement]) { return }
+    if ($c.RenderTransform -isnot [System.Windows.Media.TranslateTransform]) { $c.RenderTransform = New-Object System.Windows.Media.TranslateTransform }
+    Set-Anim $c $OpacityDP 1 $BkMotion.Base 0
+    Set-Anim $c.RenderTransform ([System.Windows.Media.TranslateTransform]::YProperty) 0 ($BkMotion.Base + 40) 8
+})
+
+# ---- dark title bars, themed message boxes and tray menu ----
+Add-Type -ReferencedAssemblies PresentationFramework, PresentationCore, WindowsBase, System.Xaml, System.Windows.Forms, System.Drawing -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class BkDwm {
+    [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int value, int size);
+    // Dark title bar in BloxKit's colors (Windows 11; older Windows just keeps its own).
+    public static void Dark(IntPtr h, int caption, int text, int border) {
+        int on = 1;
+        DwmSetWindowAttribute(h, 20, ref on, 4);
+        DwmSetWindowAttribute(h, 35, ref caption, 4);
+        DwmSetWindowAttribute(h, 36, ref text, 4);
+        DwmSetWindowAttribute(h, 34, ref border, 4);
+    }
+}
+// [BkBox]::Show(...) takes the same words as MessageBox.Show and shows BloxKit's own dialog
+// (set up from the script); without it, the plain Windows box.
+public static class BkBox {
+    public static Func<string, string, string, string, string> Handler;
+    public static string Show(string text) { return Show(text, "BloxKit", "OK", "None"); }
+    public static string Show(string text, string caption) { return Show(text, caption, "OK", "None"); }
+    public static string Show(string text, string caption, string buttons) { return Show(text, caption, buttons, "None"); }
+    public static string Show(string text, string caption, string buttons, string icon) {
+        if (Handler != null) { try { return Handler(text, caption, buttons, icon); } catch { } }
+        var b = (System.Windows.MessageBoxButton)Enum.Parse(typeof(System.Windows.MessageBoxButton), buttons);
+        var i = (System.Windows.MessageBoxImage)Enum.Parse(typeof(System.Windows.MessageBoxImage), icon);
+        return System.Windows.MessageBox.Show(text, caption, b, i).ToString();
+    }
+}
+public class BkMenuColors : System.Windows.Forms.ProfessionalColorTable {
+    static System.Drawing.Color C(int rgb) { return System.Drawing.Color.FromArgb(255, (rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255); }
+    public override System.Drawing.Color ToolStripDropDownBackground { get { return C(0x1F2937); } }
+    public override System.Drawing.Color ImageMarginGradientBegin { get { return C(0x1F2937); } }
+    public override System.Drawing.Color ImageMarginGradientMiddle { get { return C(0x1F2937); } }
+    public override System.Drawing.Color ImageMarginGradientEnd { get { return C(0x1F2937); } }
+    public override System.Drawing.Color MenuBorder { get { return C(0x2E3A4D); } }
+    public override System.Drawing.Color MenuItemBorder { get { return C(0x334155); } }
+    public override System.Drawing.Color MenuItemSelected { get { return C(0x334155); } }
+    public override System.Drawing.Color MenuItemSelectedGradientBegin { get { return C(0x334155); } }
+    public override System.Drawing.Color MenuItemSelectedGradientEnd { get { return C(0x334155); } }
+    public override System.Drawing.Color SeparatorDark { get { return C(0x2E3A4D); } }
+    public override System.Drawing.Color SeparatorLight { get { return C(0x2E3A4D); } }
+}
+'@
+function Get-ColorRef([string]$token) { $c = [System.Windows.Media.ColorConverter]::ConvertFromString($BkTokens[$token]); [int]$c.B * 65536 + [int]$c.G * 256 + [int]$c.R }
+[System.Windows.EventManager]::RegisterClassHandler([System.Windows.Window], [System.Windows.FrameworkElement]::LoadedEvent, [System.Windows.RoutedEventHandler]{
+    param($w, $e)
+    try { [BkDwm]::Dark((New-Object System.Windows.Interop.WindowInteropHelper($w)).Handle, (Get-ColorRef "Midnight"), (Get-ColorRef "Cloud"), (Get-ColorRef "Line")) } catch {}
+})
+function Initialize-BkDialog($dlg) {
+    # Every dialog: on top of the app, the app's icon and font, and a quick fade in.
+    if ($win.IsVisible) { $dlg.Owner = $win } else { $dlg.WindowStartupLocation = "CenterScreen" }
+    $dlg.Icon = $win.Icon; $dlg.ShowInTaskbar = $false
+    $dlg.FontFamily = $win.FontFamily
+    if (Test-Motion) { $dlg.Opacity = 0; $dlg.Add_ContentRendered({ param($d, $e) Set-Anim $d $OpacityDP 1 $BkMotion.Fast 0 }) }
+}
+function Show-BkMessage([string]$text, [string]$caption, [string]$buttons, [string]$icon) {
+    # BloxKit's own message box: the mascot shows the kind of message, the words say it.
+    [xml]$mx = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="BloxKit" Width="500" SizeToContent="Height" ResizeMode="NoResize" WindowStartupLocation="CenterOwner"
+        Background="{StaticResource Surface}" Foreground="{StaticResource Ink}" FontSize="14">
+  <Grid Margin="22,20,22,18">
+    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+    <Grid.RowDefinitions><RowDefinition/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+    <Image x:Name="Art" Width="84" Height="84" VerticalAlignment="Top" Margin="-6,-4,14,0"/>
+    <StackPanel Grid.Column="1">
+      <TextBlock x:Name="Head" Style="{StaticResource Title}" TextWrapping="Wrap"/>
+      <TextBlock x:Name="Body" Foreground="{StaticResource InkSoft}" TextWrapping="Wrap" LineHeight="20" Margin="0,4,0,0"/>
+    </StackPanel>
+    <StackPanel x:Name="Buttons" Grid.Row="1" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,18,0,0"/>
+  </Grid>
+</Window>
+'@
+    $d = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $mx))
+    Initialize-BkDialog $d
+    $art = switch -Regex ($icon) { "Warning|Exclamation" { "Attention" } "Error|Hand|Stop" { "Error" } "Information|Asterisk" { "Happy" } default { "Default" } }
+    $d.FindName("Art").Source = $app.TryFindResource("Bk.Mascot.$art")
+    $d.FindName("Head").Text = $(if ($caption) { $caption } else { "BloxKit" })
+    $d.FindName("Body").Text = $text
+    $names = switch ($buttons) { "YesNo" { "Yes", "No" } "YesNoCancel" { "Yes", "No", "Cancel" } "OKCancel" { "OK", "Cancel" } default { , "OK" } }
+    $cancel = $(if ($names -contains "Cancel") { "Cancel" } elseif ($names -contains "No") { "No" } else { "OK" })
+    $script:BoxResult = $cancel   # closing the window counts as the "no / cancel" answer
+    $first = $null
+    foreach ($n in $names) {
+        $b = New-Object System.Windows.Controls.Button
+        $b.Style = $BtnStyle; $b.Content = $n; $b.MinWidth = 88; $b.Padding = New-Object System.Windows.Thickness 16,8,16,8
+        $b.Margin = New-Object System.Windows.Thickness 8,0,0,0; $b.Tag = $n
+        if (-not $first) { $first = $b; $b.IsDefault = $true; $b.Background = Brush "Accent" }
+        if ($n -eq $cancel) { $b.IsCancel = $true }
+        $b.Add_Click({ param($s, $e) $script:BoxResult = [string]$s.Tag; [System.Windows.Window]::GetWindow($s).Close() })
+        $d.FindName("Buttons").Children.Add($b) | Out-Null
+    }
+    $d.Add_ContentRendered({ $first.Focus() | Out-Null })
+    $d.ShowDialog() | Out-Null
+    return [string]$script:BoxResult
+}
+[BkBox]::Handler = [Func[string, string, string, string, string]]{ param($t, $c, $b, $i) Show-BkMessage $t $c $b $i }
 function Same($a, $b) { [object]::ReferenceEquals($a, $b) }
 
 # =========================================================== ACCOUNTS TAB ==
@@ -2772,19 +3067,19 @@ function Ask-Text([string]$title, [string]$prompt, [string]$default) {
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Width="420" SizeToContent="Height" ResizeMode="NoResize" WindowStartupLocation="CenterOwner"
-        Background="#161A21" FontFamily="Segoe UI" FontSize="14">
+        Background="{StaticResource Surface}" FontFamily="Segoe UI" FontSize="14">
   <StackPanel Margin="20">
-    <TextBlock x:Name="P" Foreground="White" TextWrapping="Wrap" Margin="0,0,0,8"/>
-    <TextBox x:Name="T" Background="#0F1217" Foreground="White" BorderBrush="#2E3541" Padding="8,7" CaretBrush="White"/>
+    <TextBlock x:Name="P" Foreground="{StaticResource Ink}" TextWrapping="Wrap" Margin="0,0,0,8"/>
+    <TextBox x:Name="T" Background="{StaticResource Input}" Foreground="{StaticResource Ink}" BorderBrush="{StaticResource Line}" Padding="8,7" CaretBrush="{StaticResource Ink}"/>
     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
-      <Button x:Name="C" Content="Cancel" Padding="16,8" Margin="0,0,8,0" Background="#252B35" Foreground="White" BorderThickness="0"/>
-      <Button x:Name="O" Content="OK" Padding="20,8" Background="#3D7BF7" Foreground="White" BorderThickness="0" IsDefault="True"/>
+      <Button x:Name="C" Content="Cancel" Padding="16,8" Margin="0,0,8,0" Background="{StaticResource Raised}" Foreground="{StaticResource Ink}" BorderThickness="0"/>
+      <Button x:Name="O" Content="OK" Padding="20,8" Background="{StaticResource Accent}" Foreground="{StaticResource Ink}" BorderThickness="0" IsDefault="True"/>
     </StackPanel>
   </StackPanel>
 </Window>
 '@
     $dlg = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $dx))
-    $dlg.Owner = $win; $dlg.Title = $title
+    Initialize-BkDialog $dlg; $dlg.Title = $title
     $p = $dlg.FindName("P"); $t = $dlg.FindName("T"); $ok = $dlg.FindName("O"); $cancel = $dlg.FindName("C")
     $p.Text = $prompt; $t.Text = $default
     $script:AskResult = $null
@@ -2839,28 +3134,28 @@ function Get-AccStatusInfo($a) {
     $st = $script:AccStatus[$a.nick.ToLower()]
     $up = Format-Dur (Get-TodaySecs $a.nick)
     $upText = $(if ($up) { "   |   $up today" } else { "" })
-    if ($winOf -and $winOf.DiscFlag) { return @{ Color = "#EF4444"; Text = $(if ($winOf.DiscText) { "Disconnected: $($winOf.DiscText)" } else { "Might be disconnected" }) + "  (screen #$($winOf.Num))$upText" } }
+    if ($winOf -and $winOf.DiscFlag) { return @{ Color = "Danger"; Text = $(if ($winOf.DiscText) { "Disconnected: $($winOf.DiscText)" } else { "Might be disconnected" }) + "  (screen #$($winOf.Num))$upText" } }
     if ($winOf) {
         $where = "  (screen #$($winOf.Num))$upText"
         switch (Get-WinState $winOf) {
             "connected"    {
                 $srv = $(switch (Get-ServerCheck $script:Planned[$a.nick.ToLower()] $winOf.Sess.Job) {
                     "confirmed" { "   |   on the planned server " + [char]0x2713 } "elsewhere" { "   |   on another server than planned (it was probably full)" } default { "" } })
-                return @{ Color = "#22C55E"; Text = "In game$srv$where" }
+                return @{ Color = "Success"; Text = "In game$srv$where" }
             }
-            "joining"      { return @{ Color = "#3B82F6"; Text = "Joining " + $(if ($script:Planned[$a.nick.ToLower()]) { "the planned server" } else { "a server" }) + "...$where" } }
-            "disconnected" { return @{ Color = "#3B82F6"; Text = "Connection dropped, waiting to see if it's a teleport...$where" } }
-            "left"         { return @{ Color = "#94A3B8"; Text = "Roblox open, not in a game$where" } }
-            "unknown"      { return @{ Color = "#94A3B8"; Text = "Roblox open (no Roblox log found, so I can't tell if it's in a game)$where" } }
-            default        { return @{ Color = "#3B82F6"; Text = "Roblox is starting...$where" } }
+            "joining"      { return @{ Color = "Accent"; Text = "Joining " + $(if ($script:Planned[$a.nick.ToLower()]) { "the planned server" } else { "a server" }) + "...$where" } }
+            "disconnected" { return @{ Color = "Accent"; Text = "Connection dropped, waiting to see if it's a teleport...$where" } }
+            "left"         { return @{ Color = "Muted"; Text = "Roblox open, not in a game$where" } }
+            "unknown"      { return @{ Color = "Muted"; Text = "Roblox open (no Roblox log found, so I can't tell if it's in a game)$where" } }
+            default        { return @{ Color = "Accent"; Text = "Roblox is starting...$where" } }
         }
     }
-    if ($st -and $st.State -eq "failed") { return @{ Color = "#F97316"; Text = "Didn't load ($($st.Time))$upText" } }
-    if ($st -and $st.State -eq "limit") { return @{ Color = "#F97316"; Text = "Not opened: limit of $($script:State.maxClients) Roblox windows ($($st.Time))$upText" } }
-    if ($st -and $st.State -eq "disc") { return @{ Color = "#EF4444"; Text = "Window closed / kicked ($($st.Time))$upText" } }
-    if ($st -and $st.State -eq "opening") { return @{ Color = "#3B82F6"; Text = "Opening...$upText" } }
-    if ($a.needsLogin) { return @{ Color = "#F59E0B"; Text = "Needs sign-in on this PC (click Sign in)$upText" } }
-    return @{ Color = "#4B5563"; Text = "Not open$upText" }
+    if ($st -and $st.State -eq "failed") { return @{ Color = "Caution"; Text = "Didn't load ($($st.Time))$upText" } }
+    if ($st -and $st.State -eq "limit") { return @{ Color = "Caution"; Text = "Not opened: limit of $($script:State.maxClients) Roblox windows ($($st.Time))$upText" } }
+    if ($st -and $st.State -eq "disc") { return @{ Color = "Danger"; Text = "Window closed / kicked ($($st.Time))$upText" } }
+    if ($st -and $st.State -eq "opening") { return @{ Color = "Accent"; Text = "Opening...$upText" } }
+    if ($a.needsLogin) { return @{ Color = "Warning"; Text = "Needs sign-in on this PC (click Sign in)$upText" } }
+    return @{ Color = "Off"; Text = "Not open$upText" }
 }
 
 function Render-Accounts {
@@ -2870,7 +3165,7 @@ function Render-Accounts {
     $ui.EmptyText.Visibility = $(if ($accs.Count -eq 0) { "Visible" } else { "Collapsed" })
     foreach ($a in $accs) {
         $row = New-Object System.Windows.Controls.Border
-        $row.Background = Brush "#1D222A"
+        $row.Background = Brush "SurfaceAlt"
         $row.CornerRadius = New-Object System.Windows.CornerRadius 8
         $row.Padding = New-Object System.Windows.Thickness 10,8,8,8
         $row.Margin = New-Object System.Windows.Thickness 0,0,0,6
@@ -2902,26 +3197,26 @@ function Render-Accounts {
         $info.VerticalAlignment = "Center"
         $line = New-Object System.Windows.Controls.StackPanel; $line.Orientation = "Horizontal"
         $nm = New-Object System.Windows.Controls.TextBlock
-        $nm.Text = $a.nick; $nm.Foreground = Brush "#FFFFFF"; $nm.FontSize = 15; $nm.FontWeight = "SemiBold"
+        $nm.Text = $a.nick; $nm.Foreground = Brush "Ink"; $nm.FontSize = 15; $nm.FontWeight = "SemiBold"
         $line.Children.Add($nm) | Out-Null
         if ($a.isMain) {
             $badge = New-Object System.Windows.Controls.Border
-            $badge.Background = Brush "#F5B301"; $badge.CornerRadius = New-Object System.Windows.CornerRadius 4
+            $badge.Background = Brush "Star"; $badge.CornerRadius = New-Object System.Windows.CornerRadius 4
             $badge.Padding = New-Object System.Windows.Thickness 6,1,6,1; $badge.Margin = New-Object System.Windows.Thickness 8,0,0,0
             $bt = New-Object System.Windows.Controls.TextBlock
-            $bt.Text = "MAIN"; $bt.FontSize = 11; $bt.FontWeight = "Bold"; $bt.Foreground = Brush "#1A1A1A"
+            $bt.Text = "MAIN"; $bt.FontSize = 11; $bt.FontWeight = "Bold"; $bt.Foreground = Brush "OnStar"
             $badge.Child = $bt; $line.Children.Add($badge) | Out-Null
         }
         $issues = @(Get-SetupIssues $a)
         if ($issues.Count) {
             # Small amber chip; the tooltip says exactly what to do.
             $chip = New-Object System.Windows.Controls.Border
-            $chip.Background = Brush "#3A2A0E"; $chip.BorderBrush = Brush "#B7791F"; $chip.BorderThickness = New-Object System.Windows.Thickness 1
+            $chip.Background = Brush "WarningBg"; $chip.BorderBrush = Brush "WarnEdge"; $chip.BorderThickness = New-Object System.Windows.Thickness 1
             $chip.CornerRadius = New-Object System.Windows.CornerRadius 4
             $chip.Padding = New-Object System.Windows.Thickness 6,0,6,1; $chip.Margin = New-Object System.Windows.Thickness 8,0,0,0
             $chip.VerticalAlignment = "Center"
             $ct = New-Object System.Windows.Controls.TextBlock
-            $ct.Text = [string][char]0x26A0 + " setup ($($issues.Count))"; $ct.FontSize = 11; $ct.Foreground = Brush "#FBBF24"
+            $ct.Text = [string][char]0x26A0 + " setup ($($issues.Count))"; $ct.FontSize = 11; $ct.Foreground = Brush "WarningInk"
             $chip.Child = $ct
             $chip.ToolTip = ($issues | ForEach-Object { [string][char]0x2022 + " " + $_ }) -join "`n"
             [System.Windows.Controls.ToolTipService]::SetShowDuration($chip, 30000)
@@ -2936,13 +3231,13 @@ function Render-Accounts {
 
         $star = New-Object System.Windows.Controls.Button
         $star.Style = $BtnStyle; $star.Content = $(if ($a.isMain) { [char]0x2605 } else { [char]0x2606 })
-        $star.ToolTip = "Make this my main account"; $star.Foreground = Brush "#F5B301"
+        $star.ToolTip = "Make this my main account"; $star.Foreground = Brush "Star"
         $star.Padding = New-Object System.Windows.Thickness 10,6,10,6; $star.Margin = New-Object System.Windows.Thickness 4,0,0,0
         $star.Tag = $a; $star.Add_Click({ param($s,$e) Set-Main $s.Tag })
         [System.Windows.Controls.Grid]::SetColumn($star, 3)
 
         $open = New-Object System.Windows.Controls.Button
-        $open.Style = $BtnStyle; $open.Background = Brush "#3D7BF7"
+        $open.Style = $BtnStyle; $open.Background = Brush "Accent"
         $open.Content = $(if ($winOf) { "Show" } elseif ($a.needsLogin) { "Sign in" } else { "Open" })
         $open.ToolTip = $(if ($winOf) { "Play this account's window" } elseif ($a.needsLogin) { "This account's Chrome profile is new on this PC. Sign in to Roblox once." } else { "Open just this account (uses the link on the right)" })
         $open.Padding = New-Object System.Windows.Thickness 12,6,12,6; $open.Margin = New-Object System.Windows.Thickness 4,0,0,0
@@ -2975,7 +3270,7 @@ function Render-Accounts {
                 $mi = New-Object System.Windows.Controls.MenuItem
                 $mi.Header = $it.H; $mi.Tag = @{ Acc = $acct; Act = $it.A }
                 $mi.Style = $win.FindResource("DarkItem")
-                if ($it.A -eq "remove") { $mi.Foreground = Brush "#FCA5A5" }
+                if ($it.A -eq "remove") { $mi.Foreground = Brush "DangerSoftInk" }
                 $mi.Add_Click({
                     param($m,$x)
                     $t = $m.Tag
@@ -3033,7 +3328,7 @@ function Set-Main($acc) {
 function Remove-Account($acc) {
     $inGroups = @($script:State.groups | Where-Object { @($_.nicks) -contains $acc.nick } | ForEach-Object { $_.name })
     $groupNote = $(if ($inGroups.Count) { "`n`nIt is also taken out of: " + ($inGroups -join ", ") + "." } else { "" })
-    $r = [System.Windows.MessageBox]::Show("Remove $($acc.nick) from the list?`n`nThis only removes it from this app. The Chrome profile stays.$groupNote", "Remove account", "YesNo", "Question")
+    $r = [BkBox]::Show("Remove $($acc.nick) from the list?`n`nThis only removes it from this app. The Chrome profile stays.$groupNote", "Remove account", "YesNo", "Question")
     if ($r -ne "Yes") { return }
     Remove-AccountRecord $script:State $acc
     Render-Groups
@@ -3043,14 +3338,14 @@ function Remove-Account($acc) {
 
 function Setup-Helper($acc) {
     if (-not (Test-Path (Join-Path $HelperDir "manifest.json"))) {
-        [System.Windows.MessageBox]::Show("I can't find the AutoJoinHelper folder. Keep it next to RobloxManager.ps1.", "Helper missing", "OK", "Warning") | Out-Null
+        [BkBox]::Show("I can't find the AutoJoinHelper folder. Keep it next to BloxKit.ps1.", "Helper missing", "OK", "Warning") | Out-Null
         return
     }
     try { Set-Clipboard -Value $HelperDir } catch {}
     Open-Chrome $acc "chrome://extensions" | Out-Null
-    [System.Windows.MessageBox]::Show(
+    [BkBox]::Show(
         "Chrome just opened the Extensions page for $($acc.nick).`n`n" +
-        "ALREADY INSTALLED? Find 'Roblox Manager Auto-Join Helper' (or the old 'Roblox Launcher Auto-Join Helper') " +
+        "ALREADY INSTALLED? Find 'BloxKit Auto-Join Helper' (older copies are called 'BloxKit' or 'Roblox Launcher Auto-Join Helper') " +
         "and click its round reload arrow. That loads the new version (2.2, which can also close the launch tab).`n`n" +
         "NOT INSTALLED YET? Do this once:`n" +
         "1. Turn ON 'Developer mode' (switch at the top right).`n" +
@@ -3074,7 +3369,7 @@ function Show-SetupCheck($acc) {
            "'Always allow' Roblox to open: $allow`n`n" +
            $(if ($issues.Count) { "To do:`n- " + ($issues -join "`n- ") } else { "Nothing to do. This account is set up." }) +
            "`n`nRead from Chrome's own files. This app never changes them."
-    [System.Windows.MessageBox]::Show($msg, "Chrome setup for $($acc.nick)", "OK", $(if ($issues.Count) { "Warning" } else { "Information" })) | Out-Null
+    [BkBox]::Show($msg, "Chrome setup for $($acc.nick)", "OK", $(if ($issues.Count) { "Warning" } else { "Information" })) | Out-Null
 }
 
 function Update-AutoJoinBox {
@@ -3090,14 +3385,14 @@ function Get-HelperFolderVersion {
 function Render-ChromeSetup {
     # Settings > Chrome setup: every account's auto-click switch and what its Chrome profile has.
     $v = Get-HelperFolderVersion
-    $ui.CsHint.Text = $(if ($v) { "Helper files: version $v in $HelperDir" } else { [string][char]0x26A0 + "  The AutoJoinHelper folder is missing. Keep it next to RobloxManager.ps1." })
-    $ui.CsHint.Foreground = Brush $(if ($v) { "#98A2B3" } else { "#F87171" })
+    $ui.CsHint.Text = $(if ($v) { "Helper files: version $v in $HelperDir" } else { [string][char]0x26A0 + "  The AutoJoinHelper folder is missing. Keep it next to BloxKit.ps1." })
+    $ui.CsHint.Foreground = Brush $(if ($v) { "Muted" } else { "DangerInk" })
     $ui.CsList.Children.Clear()
     $tabs = $script:State.tabCloseWhen -ne "off"
     foreach ($a in @($script:State.accounts)) {
         $s = Get-SetupFor $a
         $row = New-Object System.Windows.Controls.Border
-        $row.Background = Brush "#1D222A"; $row.CornerRadius = New-Object System.Windows.CornerRadius 8
+        $row.Background = Brush "SurfaceAlt"; $row.CornerRadius = New-Object System.Windows.CornerRadius 8
         $row.Padding = New-Object System.Windows.Thickness 10,7,8,7; $row.Margin = New-Object System.Windows.Thickness 0,0,0,6
         $dock = New-Object System.Windows.Controls.DockPanel
         # the one button that fixes what's missing first
@@ -3107,7 +3402,7 @@ function Render-ChromeSetup {
                  else { @("Details", "check") })
         $btn = New-Object System.Windows.Controls.Button
         $btn.Style = $BtnStyle; $btn.Content = $fix[0]; $btn.Padding = New-Object System.Windows.Thickness 10,5,10,5; $btn.Margin = New-Object System.Windows.Thickness 8,0,0,0
-        if ($fix[1] -ne "check") { $btn.Background = Brush "#3D7BF7" }
+        if ($fix[1] -ne "check") { $btn.Background = Brush "Accent" }
         $btn.Tag = @{ Acc = $a; Act = $fix[1] }
         [System.Windows.Automation.AutomationProperties]::SetName($btn, "$($fix[0]) for $($a.nick)")
         $btn.Add_Click({ param($x,$e)
@@ -3116,14 +3411,14 @@ function Render-ChromeSetup {
         [System.Windows.Controls.DockPanel]::SetDock($btn, "Right")
         $cb = New-Object System.Windows.Controls.CheckBox
         $cb.IsChecked = [bool]$a.autoJoin; $cb.VerticalAlignment = "Center"; $cb.Width = 170; $cb.Tag = $a
-        $nm = New-Object System.Windows.Controls.TextBlock; $nm.Text = $a.nick + $(if ($a.isMain) { "  " + [char]0x2605 } else { "" }); $nm.Foreground = Brush "#FFFFFF"; $nm.TextTrimming = "CharacterEllipsis"
+        $nm = New-Object System.Windows.Controls.TextBlock; $nm.Text = $a.nick + $(if ($a.isMain) { "  " + [char]0x2605 } else { "" }); $nm.Foreground = Brush "Ink"; $nm.TextTrimming = "CharacterEllipsis"
         $cb.Content = $nm; $cb.ToolTip = "Auto-click Play / Join for $($a.nick)"
         [System.Windows.Automation.AutomationProperties]::SetName($cb, "Auto-click for $($a.nick)")
         $cb.Add_Checked({ param($x,$e) if (-not $x.Tag.autoJoin) { $x.Tag.autoJoin = $true; Save-Settings; Update-AutoJoinBox; Update-LinkStatus; Render-Accounts } })
         $cb.Add_Unchecked({ param($x,$e) if ($x.Tag.autoJoin) { $x.Tag.autoJoin = $false; Save-Settings; Update-AutoJoinBox; Update-LinkStatus; Render-Accounts } })
         [System.Windows.Controls.DockPanel]::SetDock($cb, "Left")
         $chips = New-Object System.Windows.Controls.WrapPanel; $chips.VerticalAlignment = "Center"
-        $ok = "#22C55E"; $bad = "#FBBF24"; $na = "#94A3B8"
+        $ok = "Success"; $bad = "WarningInk"; $na = "Muted"
         $needHelper = $a.autoJoin -or $tabs
         $add = { param($text, $color, $tip) $chip = New-Chip $text $color; $chip.Margin = New-Object System.Windows.Thickness 0,2,6,2; $chip.ToolTip = $tip; $chips.Children.Add($chip) | Out-Null }
         if ($s.Exists) { & $add ("profile " + [char]0x2713) $ok "Chrome profile '$($a.profileDir)' is on this PC." }
@@ -3150,7 +3445,7 @@ function Render-ChromeSetup {
         $ui.CsList.Children.Add($row) | Out-Null
     }
     if (-not @($script:State.accounts).Count) {
-        $t = New-Object System.Windows.Controls.TextBlock; $t.Text = "No accounts yet."; $t.Foreground = Brush "#98A2B3"
+        $t = New-Object System.Windows.Controls.TextBlock; $t.Text = "No accounts yet."; $t.Foreground = Brush "Muted"
         $ui.CsList.Children.Add($t) | Out-Null
     }
 }
@@ -3160,7 +3455,7 @@ function Start-SignIn($accs) {
     # The app never sees or stores passwords; you sign in yourself, in Chrome.
     foreach ($a in @($accs)) {
         if (-not (Open-Chrome $a "https://www.roblox.com/login")) { return }
-        $r = [System.Windows.MessageBox]::Show(
+        $r = [BkBox]::Show(
             "Chrome opened for $($a.nick).`n`n" +
             "Sign in to Roblox there as $($a.nick). Chrome remembers it after that.`n" +
             "Faster: on the login page pick 'Quick Login' (or 'Another logged in device') and approve the code on a phone or PC where you're already signed in.`n`n" +
@@ -3179,30 +3474,30 @@ function Show-AccountDialog($existing) {
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Add account" Width="460" SizeToContent="Height" ResizeMode="NoResize"
-        WindowStartupLocation="CenterOwner" Background="#161A21" FontFamily="Segoe UI" FontSize="14">
+        WindowStartupLocation="CenterOwner" Background="{StaticResource Surface}" FontFamily="Segoe UI" FontSize="14">
   <StackPanel Margin="20">
-    <TextBlock x:Name="DTitle" Text="Add an account" Foreground="White" FontSize="18" FontWeight="Bold" Margin="0,0,0,14"/>
-    <TextBlock Text="Nickname (anything that helps you, like Main or Alt1)" Foreground="#C9D0DB" Margin="0,0,0,4"/>
-    <TextBox x:Name="NickBox" Background="#0F1217" Foreground="White" BorderBrush="#2E3541" Padding="8,7" CaretBrush="White"/>
-    <TextBlock Text="Roblox profile link (optional)" Foreground="#C9D0DB" Margin="0,14,0,2"/>
-    <TextBlock Text="Needed for your main, so alts can join its server. Open the profile on roblox.com and copy the link." Foreground="#98A2B3" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,4"/>
-    <TextBox x:Name="UrlBox" Background="#0F1217" Foreground="White" BorderBrush="#2E3541" Padding="8,7" CaretBrush="White"/>
+    <TextBlock x:Name="DTitle" Text="Add an account" Foreground="{StaticResource Ink}" FontSize="18" FontWeight="Bold" Margin="0,0,0,14"/>
+    <TextBlock Text="Nickname (anything that helps you, like Main or Alt1)" Foreground="{StaticResource InkSoft}" Margin="0,0,0,4"/>
+    <TextBox x:Name="NickBox" Background="{StaticResource Input}" Foreground="{StaticResource Ink}" BorderBrush="{StaticResource Line}" Padding="8,7" CaretBrush="{StaticResource Ink}"/>
+    <TextBlock Text="Roblox profile link (optional)" Foreground="{StaticResource InkSoft}" Margin="0,14,0,2"/>
+    <TextBlock Text="Needed for your main, so alts can join its server. Open the profile on roblox.com and copy the link." Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,4"/>
+    <TextBox x:Name="UrlBox" Background="{StaticResource Input}" Foreground="{StaticResource Ink}" BorderBrush="{StaticResource Line}" Padding="8,7" CaretBrush="{StaticResource Ink}"/>
     <StackPanel x:Name="ProfilePanel">
-      <TextBlock Text="Which Chrome should this account use?" Foreground="#C9D0DB" Margin="0,16,0,6"/>
-      <RadioButton x:Name="NewRadio" Content="A new Chrome profile just for this account (recommended)" Foreground="White" IsChecked="True" Margin="0,0,0,6"/>
-      <RadioButton x:Name="OldRadio" Content="A Chrome profile I already have:" Foreground="White"/>
+      <TextBlock Text="Which Chrome should this account use?" Foreground="{StaticResource InkSoft}" Margin="0,16,0,6"/>
+      <RadioButton x:Name="NewRadio" Content="A new Chrome profile just for this account (recommended)" Foreground="{StaticResource Ink}" IsChecked="True" Margin="0,0,0,6"/>
+      <RadioButton x:Name="OldRadio" Content="A Chrome profile I already have:" Foreground="{StaticResource Ink}"/>
       <ComboBox x:Name="ProfileCombo" Margin="22,6,0,0" IsEnabled="False"/>
     </StackPanel>
-    <TextBlock x:Name="DError" Foreground="#F87171" TextWrapping="Wrap" Margin="0,12,0,0"/>
+    <TextBlock x:Name="DError" Foreground="{StaticResource DangerInk}" TextWrapping="Wrap" Margin="0,12,0,0"/>
     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
-      <Button x:Name="CancelBtn" Content="Cancel" Padding="16,8" Margin="0,0,8,0" Background="#252B35" Foreground="White" BorderThickness="0"/>
-      <Button x:Name="SaveBtn" Content="Add and open Chrome" Padding="16,8" Background="#3D7BF7" Foreground="White" BorderThickness="0" FontWeight="SemiBold"/>
+      <Button x:Name="CancelBtn" Content="Cancel" Padding="16,8" Margin="0,0,8,0" Background="{StaticResource Raised}" Foreground="{StaticResource Ink}" BorderThickness="0"/>
+      <Button x:Name="SaveBtn" Content="Add and open Chrome" Padding="16,8" Background="{StaticResource Accent}" Foreground="{StaticResource Ink}" BorderThickness="0" FontWeight="SemiBold"/>
     </StackPanel>
   </StackPanel>
 </Window>
 '@
     $dlg = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $dx))
-    $dlg.Owner = $win
+    Initialize-BkDialog $dlg
     $d = @{}
     foreach ($n in "DTitle","NickBox","UrlBox","ProfilePanel","NewRadio","OldRadio","ProfileCombo","DError","CancelBtn","SaveBtn") { $d[$n] = $dlg.FindName($n) }
     $profiles = @(Get-ChromeProfiles)
@@ -3257,7 +3552,7 @@ function Show-AccountDialog($existing) {
             Say "Added $nick. If Chrome isn't logged in to Roblox yet, log in as $nick there."
         } else {
             Open-Chrome $acc "https://www.roblox.com/login" | Out-Null
-            [System.Windows.MessageBox]::Show("A new Chrome window just opened.`n`nLog in to Roblox there as $nick. You only do this once. Chrome will remember it.", "One last step", "OK", "Information") | Out-Null
+            [BkBox]::Show("A new Chrome window just opened.`n`nLog in to Roblox there as $nick. You only do this once. Chrome will remember it.", "One last step", "OK", "Information") | Out-Null
             Say "Added $nick. Log in once in the Chrome window that opened."
         }
     })
@@ -3325,10 +3620,10 @@ function Update-LinkStatus {
     $ui.LinkPlaceholder.Visibility = $(if ($ui.LinkBox.Text -eq "") { "Visible" } else { "Collapsed" })
     $how = $(switch (Get-AutoJoinSummary $script:State) { "all" { " The helper will start the game." } "some" { " The helper starts the game for accounts with auto-click on; click Play / Join in the others." } default { " You'll click Play / Join in each window." } })
     switch ($info.Kind) {
-        "empty" { $ui.LinkStatus.Text = "Nothing pasted yet."; $ui.LinkStatus.Foreground = Brush "#98A2B3" }
-        "bad"   { $ui.LinkStatus.Text = [string][char]0x26A0 + "  " + $info.Label; $ui.LinkStatus.Foreground = Brush "#F87171" }
-        "other" { $ui.LinkStatus.Text = [string][char]0x26A0 + "  " + $info.Label; $ui.LinkStatus.Foreground = Brush "#FDBA74" }
-        default { $ui.LinkStatus.Text = [string][char]0x2713 + "  " + (Get-LinkStatusText $info) + $how; $ui.LinkStatus.Foreground = Brush "#5BE38B" }
+        "empty" { $ui.LinkStatus.Text = "Nothing pasted yet."; $ui.LinkStatus.Foreground = Brush "Muted" }
+        "bad"   { $ui.LinkStatus.Text = [string][char]0x26A0 + "  " + $info.Label; $ui.LinkStatus.Foreground = Brush "DangerInk" }
+        "other" { $ui.LinkStatus.Text = [string][char]0x26A0 + "  " + $info.Label; $ui.LinkStatus.Foreground = Brush "CautionInk" }
+        default { $ui.LinkStatus.Text = [string][char]0x2713 + "  " + (Get-LinkStatusText $info) + $how; $ui.LinkStatus.Foreground = Brush "SuccessInk" }
     }
     Update-SpreadPanel
     Update-Buttons
@@ -3397,7 +3692,7 @@ function Update-Buttons {
 # ============================================================= GROUPS TAB ==
 # Left: the groups. Middle: the picked group's members, live. Right: open it.
 $script:SelGroupId = ""
-$GroupStatusColor = @{ "Draft" = "#94A3B8"; "Ready" = "#22C55E"; "Running" = "#22C55E"; "Partly open" = "#3B82F6"; "Opening" = "#3B82F6"; "Needs setup" = "#F59E0B" }
+$GroupStatusColor = @{ "Draft" = "Muted"; "Ready" = "Success"; "Running" = "Success"; "Partly open" = "Accent"; "Opening" = "Accent"; "Needs setup" = "Warning" }
 
 function Get-AccInfo {
     # What the app knows about each account right now (lower-case nick -> @{ Running; Ready; Groups }).
@@ -3444,24 +3739,24 @@ function Render-GroupsTab {
         $sel = $g.id -eq $script:SelGroupId
         $btn = New-Object System.Windows.Controls.Button
         $btn.Style = $BtnStyle; $btn.HorizontalContentAlignment = "Stretch"
-        $btn.Background = Brush $(if ($sel) { "#24365A" } else { "#1D222A" })
-        $btn.BorderBrush = Brush $(if ($sel) { "#3D7BF7" } else { "Transparent" })
+        $btn.Background = Brush $(if ($sel) { "AccentSoft" } else { "SurfaceAlt" })
+        $btn.BorderBrush = Brush $(if ($sel) { "Accent" } else { "Transparent" })
         $btn.Padding = New-Object System.Windows.Thickness 12,9,12,9; $btn.Margin = New-Object System.Windows.Thickness 0,0,0,6
         $sp = New-Object System.Windows.Controls.StackPanel
         $l1 = New-Object System.Windows.Controls.DockPanel
         $chip = New-Chip $(if ($sum.Status -eq "Running" -or $sum.Status -eq "Partly open") { "$($sum.Status) $($sum.Running)/$($sum.Members)" } else { $sum.Status }) $GroupStatusColor[$sum.Status]
         [System.Windows.Controls.DockPanel]::SetDock($chip, "Right")
         $nm = New-Object System.Windows.Controls.TextBlock
-        $nm.Text = $g.name; $nm.FontWeight = "SemiBold"; $nm.FontSize = 15; $nm.Foreground = Brush "#FFFFFF"; $nm.TextTrimming = "CharacterEllipsis"
+        $nm.Text = $g.name; $nm.FontWeight = "SemiBold"; $nm.FontSize = 15; $nm.Foreground = Brush "Ink"; $nm.TextTrimming = "CharacterEllipsis"
         $l1.Children.Add($chip) | Out-Null; $l1.Children.Add($nm) | Out-Null
         $l2 = New-Object System.Windows.Controls.TextBlock
-        $l2.FontSize = 12; $l2.Foreground = Brush "#98A2B3"; $l2.Margin = New-Object System.Windows.Thickness 0,2,0,0
+        $l2.FontSize = 12; $l2.Foreground = Brush "Muted"; $l2.Margin = New-Object System.Windows.Thickness 0,2,0,0
         $l2.Text = "$($sum.Members) account" + $(if ($sum.Members -ne 1) { "s" } else { "" }) + $(if ($sum.HasMain) { "  " + [char]0x00B7 + "  " + [char]0x2605 + " main" } else { "" })
         $sp.Children.Add($l1) | Out-Null; $sp.Children.Add($l2) | Out-Null
         $tag = Get-GroupScheduleTag $g $script:Run $script:State.plan $script:State.groups (Get-Mono)
         if ($tag) {
             $l3 = New-Object System.Windows.Controls.TextBlock
-            $l3.Text = $tag; $l3.FontSize = 12; $l3.Foreground = Brush "#8DB3FF"; $l3.Margin = New-Object System.Windows.Thickness 0,2,0,0
+            $l3.Text = $tag; $l3.FontSize = 12; $l3.Foreground = Brush "Focus"; $l3.Margin = New-Object System.Windows.Thickness 0,2,0,0
             $sp.Children.Add($l3) | Out-Null
         }
         $btn.Content = $sp; $btn.Tag = $g
@@ -3497,7 +3792,7 @@ function Render-GroupsTab {
     foreach ($a in $members) {
         $st = Get-AccStatusInfo $a
         $row = New-Object System.Windows.Controls.Border
-        $row.Background = Brush "#1D222A"; $row.CornerRadius = New-Object System.Windows.CornerRadius 8
+        $row.Background = Brush "SurfaceAlt"; $row.CornerRadius = New-Object System.Windows.CornerRadius 8
         $row.Padding = New-Object System.Windows.Thickness 10,8,8,8; $row.Margin = New-Object System.Windows.Thickness 0,0,0,6
         $dock = New-Object System.Windows.Controls.DockPanel
         $rm = New-Object System.Windows.Controls.Button
@@ -3515,12 +3810,12 @@ function Render-GroupsTab {
         $txt = New-Object System.Windows.Controls.StackPanel
         $l1 = New-Object System.Windows.Controls.StackPanel; $l1.Orientation = "Horizontal"
         $nm = New-Object System.Windows.Controls.TextBlock
-        $nm.Text = $a.nick; $nm.FontWeight = "SemiBold"; $nm.Foreground = Brush "#FFFFFF"
+        $nm.Text = $a.nick; $nm.FontWeight = "SemiBold"; $nm.Foreground = Brush "Ink"
         $l1.Children.Add($nm) | Out-Null
-        if ($a.isMain) { $l1.Children.Add((New-Chip "MAIN" "#F5B301")) | Out-Null }
+        if ($a.isMain) { $l1.Children.Add((New-Chip "MAIN" "Star")) | Out-Null }
         $issues = @(Get-SetupIssues $a)
         if ($a.needsLogin) { $issues = @("Needs to sign in on this PC.") + $issues }
-        if ($issues.Count) { $c = New-Chip ([string][char]0x26A0 + " setup") "#FBBF24"; $c.ToolTip = $issues -join "`n"; $l1.Children.Add($c) | Out-Null; $problems += "$($a.nick): " + $issues[0] }
+        if ($issues.Count) { $c = New-Chip ([string][char]0x26A0 + " setup") "WarningInk"; $c.ToolTip = $issues -join "`n"; $l1.Children.Add($c) | Out-Null; $problems += "$($a.nick): " + $issues[0] }
         $others = @($info[$a.nick.ToLower()].Groups | Where-Object { $_ -ne $g.name })
         $l2 = New-Object System.Windows.Controls.TextBlock
         $l2.FontSize = 12; $l2.Foreground = Brush $st.Color; $l2.TextTrimming = "CharacterEllipsis"
@@ -3547,7 +3842,7 @@ function Render-GroupsTab {
 
 function Confirm-DeleteGroup($g) {
     $inPlan = @($script:State.plan.steps | Where-Object { $_.groupId -eq $g.id }).Count
-    $r = [System.Windows.MessageBox]::Show("Delete the group '$($g.name)'?`n`nOnly the group is deleted. Its $(@($g.nicks).Count) account(s) stay on the Accounts tab." +
+    $r = [BkBox]::Show("Delete the group '$($g.name)'?`n`nOnly the group is deleted. Its $(@($g.nicks).Count) account(s) stay on the Accounts tab." +
         $(if ($inPlan) { "`n`nIt's used in the schedule ($inPlan step(s)). Those steps will need another group before the schedule can start." } else { "" }), "Delete group", "YesNo", "Warning")
     if ($r -ne "Yes") { return }
     Remove-Group $script:State $g
@@ -3561,38 +3856,38 @@ function Show-MembersDialog($g) {
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Width="520" Height="600" MinHeight="400" WindowStartupLocation="CenterOwner"
-        Background="#161A21" FontFamily="Segoe UI" FontSize="14">
+        Background="{StaticResource Surface}" FontFamily="Segoe UI" FontSize="14">
   <DockPanel Margin="20">
     <StackPanel DockPanel.Dock="Top">
-      <TextBlock x:Name="T" Foreground="White" FontSize="18" FontWeight="Bold" Margin="0,0,0,12" TextTrimming="CharacterEllipsis"/>
+      <TextBlock x:Name="T" Foreground="{StaticResource Ink}" FontSize="18" FontWeight="Bold" Margin="0,0,0,12" TextTrimming="CharacterEllipsis"/>
       <Grid Margin="0,0,0,8">
         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="170"/></Grid.ColumnDefinitions>
-        <TextBox x:Name="Q" Background="#0F1217" Foreground="White" BorderBrush="#2E3541" Padding="8,7" CaretBrush="White" AutomationProperties.Name="Search accounts" ToolTip="Search by nickname"/>
+        <TextBox x:Name="Q" Background="{StaticResource Input}" Foreground="{StaticResource Ink}" BorderBrush="{StaticResource Line}" Padding="8,7" CaretBrush="{StaticResource Ink}" AutomationProperties.Name="Search accounts" ToolTip="Search by nickname"/>
         <ComboBox x:Name="F" Grid.Column="1" Margin="8,0,0,0" AutomationProperties.Name="Show"/>
       </Grid>
       <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
-        <Button x:Name="All" Content="Tick all shown" Padding="12,6" Margin="0,0,8,0" Background="#252B35" Foreground="White" BorderThickness="0"/>
-        <Button x:Name="None" Content="Untick all shown" Padding="12,6" Background="#252B35" Foreground="White" BorderThickness="0"/>
+        <Button x:Name="All" Content="Tick all shown" Padding="12,6" Margin="0,0,8,0" Background="{StaticResource Raised}" Foreground="{StaticResource Ink}" BorderThickness="0"/>
+        <Button x:Name="None" Content="Untick all shown" Padding="12,6" Background="{StaticResource Raised}" Foreground="{StaticResource Ink}" BorderThickness="0"/>
       </StackPanel>
     </StackPanel>
     <StackPanel DockPanel.Dock="Bottom">
-      <TextBlock x:Name="N" Foreground="#98A2B3" Margin="0,8,0,0"/>
+      <TextBlock x:Name="N" Foreground="{StaticResource Muted}" Margin="0,8,0,0"/>
       <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
-        <Button x:Name="C" Content="Cancel" Padding="16,8" Margin="0,0,8,0" Background="#252B35" Foreground="White" BorderThickness="0" IsCancel="True"/>
-        <Button x:Name="O" Content="Save" Padding="20,8" Background="#3D7BF7" Foreground="White" BorderThickness="0" FontWeight="SemiBold"/>
+        <Button x:Name="C" Content="Cancel" Padding="16,8" Margin="0,0,8,0" Background="{StaticResource Raised}" Foreground="{StaticResource Ink}" BorderThickness="0" IsCancel="True"/>
+        <Button x:Name="O" Content="Save" Padding="20,8" Background="{StaticResource Accent}" Foreground="{StaticResource Ink}" BorderThickness="0" FontWeight="SemiBold"/>
       </StackPanel>
     </StackPanel>
-    <Border Background="#0F1217" CornerRadius="8" Padding="10">
+    <Border Background="{StaticResource Input}" CornerRadius="8" Padding="10">
       <Grid>
         <ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel x:Name="L"/></ScrollViewer>
-        <TextBlock x:Name="E" Text="No accounts match." Foreground="#98A2B3" Visibility="Collapsed"/>
+        <TextBlock x:Name="E" Text="No accounts match." Foreground="{StaticResource Muted}" Visibility="Collapsed"/>
       </Grid>
     </Border>
   </DockPanel>
 </Window>
 '@
     $dlg = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $dx))
-    $dlg.Owner = $win; $dlg.Title = "Members of $($g.name)"
+    Initialize-BkDialog $dlg; $dlg.Title = "Members of $($g.name)"
     try { $dlg.Resources.MergedDictionaries.Add($win.Resources) } catch {}   # the app's dark check boxes and drop-downs
     $d = @{}; foreach ($n in "T","Q","F","All","None","N","C","O","L","E") { $d[$n] = $dlg.FindName($n) }
     $d.T.Text = "Who's in '$($g.name)'?"
@@ -3613,8 +3908,8 @@ function Show-MembersDialog($g) {
             $cb.IsChecked = $picked.Contains($a.nick.ToLower()); $cb.Tag = $a.nick.ToLower(); $cb.Margin = New-Object System.Windows.Thickness 0,0,0,8
             $i = $info[$a.nick.ToLower()]
             $sp = New-Object System.Windows.Controls.StackPanel
-            $t1 = New-Object System.Windows.Controls.TextBlock; $t1.Text = $a.nick + $(if ($a.isMain) { "   " + [char]0x2605 + " main" } else { "" }); $t1.Foreground = Brush "#FFFFFF"
-            $t2 = New-Object System.Windows.Controls.TextBlock; $t2.FontSize = 12; $t2.Foreground = Brush "#98A2B3"
+            $t1 = New-Object System.Windows.Controls.TextBlock; $t1.Text = $a.nick + $(if ($a.isMain) { "   " + [char]0x2605 + " main" } else { "" }); $t1.Foreground = Brush "Ink"
+            $t2 = New-Object System.Windows.Controls.TextBlock; $t2.FontSize = 12; $t2.Foreground = Brush "Muted"
             $t2.Text = $(if ($i.Running) { "open" } else { "not open" }) + "   |   " + $(if (@($i.Groups).Count) { "in: " + (@($i.Groups) -join ", ") } else { "in no group" }) + $(if (-not $i.Ready) { "   |   needs setup" } else { "" })
             $sp.Children.Add($t1) | Out-Null; $sp.Children.Add($t2) | Out-Null
             $cb.Content = $sp
@@ -3740,7 +4035,7 @@ function Invoke-Plan([string]$event, [bool]$closeOnStop = $false) {
     }
     $after = "$($script:Run.State)/$($script:Run.Step)"
     if ($after -ne $before -and @("completed", "stopped") -contains $script:Run.State -and $script:State.webhookOnDone) {
-        Send-Webhook "Roblox Manager schedule: $($script:Run.Reason)" | Out-Null
+        Send-Webhook "BloxKit schedule: $($script:Run.Reason)" | Out-Null
     }
     if ($after -ne $before -or $acts.Count) { Save-PlanRun; Render-ScheduleTab }
     elseif ((Test-PlanActive) -and (Get-Mono) - $script:RunSavedAt -ge 30) { Save-PlanRun }   # keep the time saved in case the app closes
@@ -3792,7 +4087,7 @@ function Render-ScheduleTab {
         $g = Get-GroupById $script:State.groups $st.groupId
         $now = $active -and $script:Run.Step -eq $i
         $row = New-Object System.Windows.Controls.Border
-        $row.Background = Brush $(if ($now) { "#24365A" } else { "#1D222A" }); $row.CornerRadius = New-Object System.Windows.CornerRadius 8
+        $row.Background = Brush $(if ($now) { "AccentSoft" } else { "SurfaceAlt" }); $row.CornerRadius = New-Object System.Windows.CornerRadius 8
         $row.Padding = New-Object System.Windows.Thickness 10,6,6,6; $row.Margin = New-Object System.Windows.Thickness 0,0,0,6
         $dock = New-Object System.Windows.Controls.DockPanel
         $btns = New-Object System.Windows.Controls.StackPanel; $btns.Orientation = "Horizontal"
@@ -3821,14 +4116,14 @@ function Render-ScheduleTab {
             if ([int]::TryParse($s.Text.Trim(), [ref]$m) -and $m -ge 1 -and $m -le 1440) { if ($s.Tag.minutes -ne $m) { $s.Tag.minutes = $m; Save-Settings } }
             else { Say "Type the minutes as a number from 1 to 1440." }
             $s.Text = "" + $s.Tag.minutes })
-        $mt = New-Object System.Windows.Controls.TextBlock; $mt.Text = " min"; $mt.Foreground = Brush "#98A2B3"; $mt.VerticalAlignment = "Center"
+        $mt = New-Object System.Windows.Controls.TextBlock; $mt.Text = " min"; $mt.Foreground = Brush "Muted"; $mt.VerticalAlignment = "Center"
         $mp = New-Object System.Windows.Controls.StackPanel; $mp.Orientation = "Horizontal"; $mp.Margin = New-Object System.Windows.Thickness 8,0,0,0
         $mp.Children.Add($mins) | Out-Null; $mp.Children.Add($mt) | Out-Null
         [System.Windows.Controls.DockPanel]::SetDock($mp, "Right")
         $nm = New-Object System.Windows.Controls.TextBlock
         $nm.VerticalAlignment = "Center"; $nm.TextTrimming = "CharacterEllipsis"
         $nm.Text = "$($i + 1).  " + $(if ($g) { "$($g.name)  ($(@($g.nicks).Count))" } else { "(deleted group)" })
-        $nm.Foreground = Brush $(if ($g) { "#FFFFFF" } else { "#F87171" }); $nm.FontWeight = $(if ($now) { "SemiBold" } else { "Normal" })
+        $nm.Foreground = Brush $(if ($g) { "Ink" } else { "DangerInk" }); $nm.FontWeight = $(if ($now) { "SemiBold" } else { "Normal" })
         foreach ($c in $btns, $mp, $nm) { $dock.Children.Add($c) | Out-Null }
         $row.Child = $dock
         $ui.SStepList.Children.Add($row) | Out-Null
@@ -3852,11 +4147,11 @@ function Render-ScheduleTab {
 function Start-Plan {
     $v = Test-Plan $script:State.plan $script:State (Get-AccInfo) (Get-LinkInfo $ui.LinkBox.Text).Kind
     if ($v.Errors.Count) {
-        [System.Windows.MessageBox]::Show("The schedule can't start yet:`n`n- " + ($v.Errors -join "`n- "), "Schedule", "OK", "Information") | Out-Null
+        [BkBox]::Show("The schedule can't start yet:`n`n- " + ($v.Errors -join "`n- "), "Schedule", "OK", "Information") | Out-Null
         return
     }
     if ($v.Warnings.Count) {
-        $r = [System.Windows.MessageBox]::Show("Start anyway?`n`n- " + ($v.Warnings -join "`n- "), "Schedule", "YesNo", "Question")
+        $r = [BkBox]::Show("Start anyway?`n`n- " + ($v.Warnings -join "`n- "), "Schedule", "YesNo", "Question")
         if ($r -ne "Yes") { return }
     }
     if (-not (Check-MultiWindow)) { return }
@@ -3906,7 +4201,7 @@ function Save-RobloxGraphicsChoice {
     $q = [int]$ui.RbxQualityBox.SelectedItem.Tag; $fps = [int]$ui.RbxFpsBox.SelectedItem.Tag
     if (-not $script:CanWriteRoblox) { Say "(test mode) Roblox's settings file isn't changed."; return }
     if ((Get-RobloxRunningCount) -gt 0) {
-        [System.Windows.MessageBox]::Show("Close all Roblox windows first.`n`nEvery client reads these settings when it starts and saves its own copy when it closes, so a change now would be overwritten.", "Roblox graphics", "OK", "Information") | Out-Null
+        [BkBox]::Show("Close all Roblox windows first.`n`nEvery client reads these settings when it starts and saves its own copy when it closes, so a change now would be overwritten.", "Roblox graphics", "OK", "Information") | Out-Null
         return
     }
     $f = Get-RobloxSettingsFile
@@ -3921,6 +4216,7 @@ function Save-RobloxGraphicsChoice {
         [IO.File]::WriteAllText($tmp, $new, (New-Object Text.UTF8Encoding $false))
         [IO.File]::Replace($tmp, $f.FullName, [NullString]::Value)   # $null would arrive as "" (an invalid path)
         Say "Saved to Roblox: $(Format-RobloxGraphics (Get-CurrentRobloxGraphics)). Open a client and check Esc > Settings shows it."
+        Show-MascotMoment "Success" "Roblox's graphics are saved."
     } catch {
         Remove-Item -LiteralPath "$($f.FullName).rml-tmp" -Force -ErrorAction SilentlyContinue
         Say "Couldn't change Roblox's settings: $($_.Exception.Message)"
@@ -3931,7 +4227,7 @@ function Undo-RobloxGraphics {
     if (-not $script:CanWriteRoblox) { Say "(test mode) Roblox's settings file isn't changed."; return }
     $b = Get-ChildItem $AppDir -Filter "roblox-settings-before-*.xml" -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
     if (-not $b) { Say "Nothing to undo: Roblox's settings weren't changed by this app."; return }
-    if ((Get-RobloxRunningCount) -gt 0) { [System.Windows.MessageBox]::Show("Close all Roblox windows first.", "Roblox graphics", "OK", "Information") | Out-Null; return }
+    if ((Get-RobloxRunningCount) -gt 0) { [BkBox]::Show("Close all Roblox windows first.", "Roblox graphics", "OK", "Information") | Out-Null; return }
     # Back into the same file it was copied from (its name is in the backup's name).
     $target = $(if ($b.Name -match '__(GlobalBasicSettings_\d+\.xml)$') { Join-Path $RobloxDataDir $Matches[1] } else { $x = Get-RobloxSettingsFile; if ($x) { $x.FullName } else { "" } })
     if (-not $target) { Say "Couldn't find Roblox's settings file."; return }
@@ -4064,13 +4360,13 @@ function Render-LoadMonitor {
     $ui.TipsList.Children.Clear()
     foreach ($t in @($tips | Select-Object -First 4)) {
         $box = New-Object System.Windows.Controls.Border
-        $box.Background = Brush $(switch ($t.Severity) { "high" { "#3A1D1D" } "medium" { "#3A2A0E" } default { "#1D222A" } })
+        $box.Background = Brush $(switch ($t.Severity) { "high" { "DangerBg" } "medium" { "WarningBg" } default { "SurfaceAlt" } })
         $box.CornerRadius = New-Object System.Windows.CornerRadius 8; $box.Padding = New-Object System.Windows.Thickness 10,8,10,8; $box.Margin = New-Object System.Windows.Thickness 0,6,0,0
         $sp = New-Object System.Windows.Controls.StackPanel
         $h = New-Object System.Windows.Controls.TextBlock; $h.Text = $t.Title; $h.FontWeight = "SemiBold"; $h.TextWrapping = "Wrap"
-        $h.Foreground = Brush $(switch ($t.Severity) { "high" { "#FCA5A5" } "medium" { "#FBBF24" } default { "#C9D0DB" } })
-        $b1 = New-Object System.Windows.Controls.TextBlock; $b1.Text = $t.Seen; $b1.FontSize = 12; $b1.Foreground = Brush "#98A2B3"; $b1.TextWrapping = "Wrap"
-        $b2 = New-Object System.Windows.Controls.TextBlock; $b2.Text = $t.Fix; $b2.FontSize = 12; $b2.Foreground = Brush "#E9ECF1"; $b2.TextWrapping = "Wrap"; $b2.Margin = New-Object System.Windows.Thickness 0,3,0,0
+        $h.Foreground = Brush $(switch ($t.Severity) { "high" { "DangerSoftInk" } "medium" { "WarningInk" } default { "InkSoft" } })
+        $b1 = New-Object System.Windows.Controls.TextBlock; $b1.Text = $t.Seen; $b1.FontSize = 12; $b1.Foreground = Brush "Muted"; $b1.TextWrapping = "Wrap"
+        $b2 = New-Object System.Windows.Controls.TextBlock; $b2.Text = $t.Fix; $b2.FontSize = 12; $b2.Foreground = Brush "Ink"; $b2.TextWrapping = "Wrap"; $b2.Margin = New-Object System.Windows.Thickness 0,3,0,0
         $box.ToolTip = $t.Why
         foreach ($c in $h, $b1, $b2) { $sp.Children.Add($c) | Out-Null }
         $nav = $(if ($t.Nav) { $t.Nav } elseif ($t.Title -match "graphics quality|frame rate|maxed out") { "settings" } else { "" })
@@ -4116,7 +4412,7 @@ function Get-LinkUrlOrWarn {
 
 function Check-MultiWindow {
     if ($script:Locks.Count -gt 0) { return $true }
-    $r = [System.Windows.MessageBox]::Show("Multi-window is OFF, so only one Roblox window will stay open.`n`nOpen anyway?", "Heads up", "YesNo", "Warning")
+    $r = [BkBox]::Show("Multi-window is OFF, so only one Roblox window will stay open.`n`nOpen anyway?", "Heads up", "YesNo", "Warning")
     return ($r -eq "Yes")
 }
 
@@ -4229,15 +4525,15 @@ function Start-Everything([string]$LinkOverride, [switch]$Silent) {
     $main = Get-Main
     if (-not $main) { Say "Star your main account first."; if ($Silent) { Send-Webhook "Scheduled start skipped: no main account is set." }; return }
     if ([string]::IsNullOrWhiteSpace($main.profileUrl)) {
-        if ($Silent) { Say "Scheduled start skipped: your main has no profile link."; Send-Webhook "Scheduled start skipped: add your main's profile link in Roblox Manager."; return }
-        [System.Windows.MessageBox]::Show("Add your main's Roblox profile link first (... > Edit on $($main.nick)).`n`nThe alts use it to join your main's server.", "One thing missing", "OK", "Information") | Out-Null
+        if ($Silent) { Say "Scheduled start skipped: your main has no profile link."; Send-Webhook "Scheduled start skipped: add your main's profile link in BloxKit."; return }
+        [BkBox]::Show("Add your main's Roblox profile link first (... > Edit on $($main.nick)).`n`nThe alts use it to join your main's server.", "One thing missing", "OK", "Information") | Out-Null
         return
     }
     $linkText = $(if ($LinkOverride) { $LinkOverride } else { $ui.LinkBox.Text })
     $info = Get-LinkInfo $linkText
     if (@("game","private","share") -notcontains $info.Kind) {
         if ($Silent) { Say "Scheduled start skipped: no game link set."; Send-Webhook "Scheduled start skipped: pick a game link in Settings > Scheduled start."; return }
-        [System.Windows.MessageBox]::Show("Paste the game (or private server) link your main should join first.", "Which game?", "OK", "Information") | Out-Null
+        [BkBox]::Show("Paste the game (or private server) link your main should join first.", "Which game?", "OK", "Information") | Out-Null
         $ui.LinkBox.Focus() | Out-Null; return
     }
     if (-not $Silent) {
@@ -4362,7 +4658,11 @@ function Finish-Queue([switch]$Quiet) {
         }
         Update-Progress $msg
         Say $msg
-        if ($script:QFailed.Count -gt 0 -or $script:State.webhookOnDone) { Send-Webhook "Roblox Manager: $msg" }
+        # The mascot reacts to how it really went: everyone opened (a small celebration for a batch), or some didn't.
+        if ($script:QFailed.Count -gt 0) { Show-MascotMoment "Error" $msg 8 }
+        elseif ($script:QTotal -ge 2) { Show-MascotMoment "Celebrate" $msg 4 }
+        elseif ($script:QTotal -eq 1) { Show-MascotMoment "Success" $msg 4 }
+        if ($script:QFailed.Count -gt 0 -or $script:State.webhookOnDone) { Send-Webhook "BloxKit: $msg" }
     }
     $ui.RetryBtn.Visibility = $(if ($script:QFailed.Count -gt 0) { "Visible" } else { "Collapsed" })
     Render-Accounts; Update-Buttons
@@ -4416,7 +4716,7 @@ function Set-TabReport([string]$nick, [string]$what, [string]$why) {
     # "Last launch tab" under the setting, and the footer: what happened to a launch's tab, and why.
     $t = "Last launch tab ($nick, $(Get-Date -Format 'HH:mm')): $what. $why"
     $ui.TabCloseLast.Text = $t
-    $ui.TabCloseLast.Foreground = Brush $(if ($what -eq "closed") { "#5BE38B" } else { "#FBBF24" })
+    $ui.TabCloseLast.Foreground = Brush $(if ($what -eq "closed") { "SuccessInk" } else { "WarningInk" })
     Say $t
 }
 $TabTimer.Add_Tick({
@@ -4424,7 +4724,7 @@ $TabTimer.Add_Tick({
     foreach ($o in @($script:Ops | Where-Object { $_.TabTracked -and -not $_.TabDone -and -not $_.TabWarned -and [int]$_.TabAsked -eq 0 -and ([DateTime]::Now - $_.Start).TotalSeconds -ge 30 })) {
         # The page opened with a launch id 30 s ago, but the helper never asked about it.
         $o | Add-Member -NotePropertyName TabWarned -NotePropertyValue $true -Force
-        Set-TabReport $o.Acc.nick "not asked about yet" "The helper in Chrome hasn't contacted Roblox Manager. Check on chrome://extensions in that profile that 'Roblox Manager Auto-Join Helper' 2.2 is on and shows no errors; if it is, something on this PC blocks Chrome from reaching 127.0.0.1."
+        Set-TabReport $o.Acc.nick "not asked about yet" "The helper in Chrome hasn't contacted BloxKit. Check on chrome://extensions in that profile that 'BloxKit Auto-Join Helper' 2.2 is on and shows no errors; if it is, something on this PC blocks Chrome from reaching 127.0.0.1."
     }
     $waiting = @($script:Ops | Where-Object { $_.TabTracked -and -not $_.TabDone -and ([DateTime]::Now - $_.Start).TotalMinutes -lt 16 })
     if ($waiting.Count -eq 0) { $TabTimer.Stop() }   # nothing to answer; the port stays open for later launches
@@ -4461,7 +4761,7 @@ function Raise-Alert([string]$nick, [string]$kind = "closed", [string]$detail = 
     $ui.AlertBar.Visibility = "Visible"
     if ($script:State.alertSound) { [System.Media.SystemSounds]::Exclamation.Play() }
     if ($Tray -and (-not $win.IsVisible -or $win.WindowState -eq "Minimized" -or -not $win.IsActive)) {
-        $Tray.ShowBalloonTip(5000, "Roblox Manager", $msg, [System.Windows.Forms.ToolTipIcon]::Warning)
+        $Tray.ShowBalloonTip(5000, "BloxKit", $msg, [System.Windows.Forms.ToolTipIcon]::Warning)
     }
     Say $msg
     Send-Webhook ([string][char]0x26A0 + " " + $msg)
@@ -4610,8 +4910,8 @@ function Build-Wall {
 
     foreach ($w in $script:Wins) {
         $tile = New-Object System.Windows.Controls.Border
-        $tile.Background = Brush "#161A21"; $tile.CornerRadius = New-Object System.Windows.CornerRadius 10
-        $tile.BorderBrush = Brush "#222833"; $tile.BorderThickness = New-Object System.Windows.Thickness 2
+        $tile.Background = Brush "Surface"; $tile.CornerRadius = New-Object System.Windows.CornerRadius 10
+        $tile.BorderBrush = Brush "Line"; $tile.BorderThickness = New-Object System.Windows.Thickness 2
         $tile.Margin = New-Object System.Windows.Thickness 4; $tile.Padding = New-Object System.Windows.Thickness 6
         $w.Tile = $tile
         $dock = New-Object System.Windows.Controls.DockPanel
@@ -4621,7 +4921,7 @@ function Build-Wall {
         [System.Windows.Controls.DockPanel]::SetDock($bar, "Top")
 
         $num = New-Object System.Windows.Controls.TextBlock
-        $num.Text = "#$($w.Num)"; $num.Foreground = Brush "#F5B301"; $num.FontWeight = "Bold"; $num.FontSize = 15
+        $num.Text = "#$($w.Num)"; $num.Foreground = Brush "Star"; $num.FontWeight = "Bold"; $num.FontSize = 15
         $num.VerticalAlignment = "Center"; $num.Margin = New-Object System.Windows.Thickness 0,0,8,0
         [System.Windows.Controls.DockPanel]::SetDock($num, "Left")
 
@@ -4641,7 +4941,7 @@ function Build-Wall {
                 $mi = New-Object System.Windows.Controls.MenuItem
                 $mi.Style = $win.FindResource("DarkItem")
                 $mi.Header = $it.H; $mi.Tag = @{ W = $ww; Act = $it.A }
-                if ($it.A -eq "close") { $mi.Foreground = Brush "#FCA5A5" }
+                if ($it.A -eq "close") { $mi.Foreground = Brush "DangerSoftInk" }
                 $mi.Add_Click({
                     param($m,$x)
                     $tg = $m.Tag
@@ -4660,9 +4960,9 @@ function Build-Wall {
             }
             $menu.PlacementTarget = $s; $menu.IsOpen = $true
         })
-        $play = New-SmallButton "Play" "Play this window (Ctrl+Alt+G to come back)" "#3D7BF7"
+        $play = New-SmallButton "Play" "Play this window (Ctrl+Alt+G to come back)" "Accent"
         $play.Tag = $w; $play.Add_Click({ param($s,$e) Play-Window $s.Tag })
-        $mute = New-SmallButton $(if ($w.Muted) { "Unmute" } else { "Mute" }) "Turn this window's sound off or on" $(if ($w.Muted) { "#6D28D9" } else { "" })
+        $mute = New-SmallButton $(if ($w.Muted) { "Unmute" } else { "Mute" }) "Turn this window's sound off or on" $(if ($w.Muted) { "Violet" } else { "" })
         $mute.Tag = $w; $mute.Add_Click({ param($s,$e) Set-Mute $s.Tag (-not $s.Tag.Muted) })
         $w.MuteBtn = $mute
 
@@ -4689,20 +4989,20 @@ function Build-Wall {
         })
 
         foreach ($c in $num, $more, $play, $mute, $afk, $name) { $bar.Children.Add($c) | Out-Null }
-        if (Same $script:PickFor $w) { $tile.BorderBrush = Brush "#F5B301" }
+        if (Same $script:PickFor $w) { $tile.BorderBrush = Brush "Star" }
 
         $info = New-Object System.Windows.Controls.TextBlock
-        $info.FontSize = 12; $info.Foreground = Brush "#98A2B3"; $info.Margin = New-Object System.Windows.Thickness 4,6,0,0
+        $info.FontSize = 12; $info.Foreground = Brush "Muted"; $info.Margin = New-Object System.Windows.Thickness 4,6,0,0
         $info.TextTrimming = "CharacterEllipsis"
         [System.Windows.Controls.DockPanel]::SetDock($info, "Bottom")
         $w.Info = $info; Update-TileInfo $w
 
         $screen = New-Object System.Windows.Controls.Border
-        $screen.Background = Brush "#000000"; $screen.CornerRadius = New-Object System.Windows.CornerRadius 6
+        $screen.Background = Brush "Screen"; $screen.CornerRadius = New-Object System.Windows.CornerRadius 6
         $screen.Cursor = [System.Windows.Input.Cursors]::Hand; $screen.ToolTip = "Click to play this window"
         $msg = New-Object System.Windows.Controls.TextBlock
         $msg.Text = "Loading screen... (if this stays, the window may be minimized. Click to open it.)"
-        $msg.Foreground = Brush "#5D6573"; $msg.TextWrapping = "Wrap"; $msg.TextAlignment = "Center"
+        $msg.Foreground = Brush "Faint"; $msg.TextWrapping = "Wrap"; $msg.TextAlignment = "Center"
         $msg.HorizontalAlignment = "Center"; $msg.VerticalAlignment = "Center"; $msg.Margin = New-Object System.Windows.Thickness 20
         $screen.Child = $msg; $screen.Tag = $w
         $screen.Add_MouseLeftButtonUp({
@@ -4743,7 +5043,7 @@ function Update-TileInfo($w) {
     }
     if ($w.DiscFlag) { $parts = @($(if ($w.DiscText) { "DISCONNECTED: $($w.DiscText)" } else { "MIGHT BE DISCONNECTED" })) + $parts }
     $w.Info.Text = ($parts -join ("  " + [char]0x00B7 + "  "))
-    $w.Info.Foreground = $(if ($w.DiscFlag) { Brush "#F87171" } else { Brush "#98A2B3" })
+    $w.Info.Foreground = $(if ($w.DiscFlag) { Brush "DangerInk" } else { Brush "Muted" })
 }
 
 function Place-Screens {
@@ -4794,7 +5094,7 @@ function Set-Mute($w, [bool]$on, [switch]$Quiet) {
     $n = [RbxCore]::SetProcessMute([RbxCore]::PidOf($w.Handle), $on)
     if ($w.MuteBtn) {
         $w.MuteBtn.Content = $(if ($on) { "Unmute" } else { "Mute" })
-        $w.MuteBtn.Background = $(if ($on) { Brush "#7C3AED" } else { Brush "#252B35" })
+        $w.MuteBtn.Background = $(if ($on) { Brush "Violet" } else { Brush "Raised" })
     }
     Update-TileInfo $w
     $script:SessionDirty = $true
@@ -4816,7 +5116,7 @@ function Get-ScreenAfk([string]$nick) { -not ($nick -and @($script:State.afkOff)
 
 function Close-RobloxWindow($w, [switch]$NoAsk) {
     if (-not $NoAsk) {
-        $r = [System.Windows.MessageBox]::Show("Close $(Label-Of $w)? That account leaves the game.", "Close window", "YesNo", "Question")
+        $r = [BkBox]::Show("Close $(Label-Of $w)? That account leaves the game.", "Close window", "YesNo", "Question")
         if ($r -ne "Yes") { return }
     }
     [void]$script:ExpectedClose.Add($w.Handle.ToInt64())
@@ -4897,12 +5197,12 @@ function Test-HiddenJump($w) {
     $ui.Tabs.SelectedItem = $ui.TabScreens
     $acts = @($script:State.afkActions); if ($acts.Count -eq 0) { $acts = @("jump") }
     $names = ($acts | ForEach-Object { $AfkActionNames[$_] }) -join ", "
-    $r = [System.Windows.MessageBox]::Show("Watch screen $(Label-Of $w).`n`nClick OK. Right after, it will try these in the background, one by one: $names.", "Test anti-AFK", "OKCancel", "Information")
+    $r = [BkBox]::Show("Watch screen $(Label-Of $w).`n`nClick OK. Right after, it will try these in the background, one by one: $names.", "Test anti-AFK", "OKCancel", "Information")
     if ($r -ne "OK") { return }
     Start-Sleep -Milliseconds 300
     foreach ($a in $acts) { Invoke-AfkAction $w $a $true; Start-Sleep -Milliseconds 700 }
     Start-Sleep -Milliseconds 500
-    $ans = [System.Windows.MessageBox]::Show("Did screen $(Label-Of $w) react ($names)?", "Test anti-AFK", "YesNo", "Question")
+    $ans = [BkBox]::Show("Did screen $(Label-Of $w) react ($names)?", "Test anti-AFK", "YesNo", "Question")
     if ($ans -eq "Yes") { $ui.ModeHidden.IsChecked = $true; $script:State.afkMode = "hidden"; Say "Hidden input works on your PC. Anti-AFK will stay invisible." }
     else { $ui.ModeQuick.IsChecked = $true; $script:State.afkMode = "quick"; Say "Hidden input didn't work, so I switched to Quick switch (it runs only while you're away)." }
     Save-Settings
@@ -4918,11 +5218,11 @@ function Get-SpotFor([string]$nick) {
 function Start-PickSpot($w) {
     $script:PickFor = $w
     $ui.Tabs.SelectedItem = $ui.TabScreens
-    if ($w.Tile) { $w.Tile.BorderBrush = Brush "#F5B301" }
+    if ($w.Tile) { $w.Tile.BorderBrush = Brush "Star" }
     Say "Click the spot on screen $(Label-Of $w) where anti-AFK should click. Press Esc to cancel."
 }
 function Stop-PickSpot {
-    if ($script:PickFor -and $script:PickFor.Tile) { $script:PickFor.Tile.BorderBrush = Brush "#222833" }
+    if ($script:PickFor -and $script:PickFor.Tile) { $script:PickFor.Tile.BorderBrush = Brush "Line" }
     $script:PickFor = $null
 }
 function Set-SpotFromScreen($w, $pos) {
@@ -4958,17 +5258,17 @@ function Update-AfkUi {
     $clock = "{0}:{1:00}" -f [Math]::Floor($script:SecondsLeft / 60), ($script:SecondsLeft % 60)
     if ($script:AfkOn) {
         $ui.AfkToggle.Content = "Anti-AFK is ON  (click to turn off)"
-        $ui.AfkToggle.Background = Brush "#15803D"
+        $ui.AfkToggle.Background = Brush "SuccessStrong"
         $names = (@($script:State.afkActions) | ForEach-Object { $AfkActionNames[$_] }) -join ", "
         if ($script:Waiting) { $ui.AfkStatus.Text = "Ready to $names. Waiting until you're away from the PC for 10 seconds..." }
         else { $ui.AfkStatus.Text = "Next $names in $clock" }
-        $ui.AfkPillDot.Fill = Brush "#22C55E"
+        $ui.AfkPillDot.Fill = Brush "Success"
         $ui.AfkPillText.Text = $(if ($script:Waiting) { "Anti-AFK waiting for you to step away" } else { "Anti-AFK on  -  next in $clock" })
     } else {
         $ui.AfkToggle.Content = "Anti-AFK is OFF  (click to turn on)"
-        $ui.AfkToggle.Background = Brush "#2F3540"
+        $ui.AfkToggle.Background = Brush "Raised"
         $ui.AfkStatus.Text = "Roblox kicks idle players after about 20 minutes. Turn this on to stay in."
-        $ui.AfkPillDot.Fill = Brush "#6B7280"
+        $ui.AfkPillDot.Fill = Brush "Off"
         $ui.AfkPillText.Text = "Anti-AFK off"
     }
     if ($TrayAfkItem) { $TrayAfkItem.Text = $(if ($script:AfkOn) { "Turn anti-AFK OFF" } else { "Turn anti-AFK ON" }) }
@@ -4979,6 +5279,7 @@ function Set-Afk([bool]$on) {
     $script:State.afkOn = $on; Save-Settings
     Reset-Countdown
     Say $(if ($on) { "Anti-AFK turned ON." } else { "Anti-AFK turned OFF." })
+    Show-MascotMoment $(if ($on) { "Happy" } else { "Default" }) $(if ($on) { "Anti-AFK is on." } else { "Anti-AFK is off." }) 3
 }
 
 # ============================================================ NEW FEATURES ==
@@ -5042,7 +5343,7 @@ function Send-Webhook([string]$text) {
     if (-not (Test-HookUrl $u)) { return $false }
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        $body = @{ username = "Roblox Manager"; content = $text } | ConvertTo-Json
+        $body = @{ username = "BloxKit"; content = $text } | ConvertTo-Json
         Invoke-RestMethod -Uri $u -Method Post -ContentType "application/json; charset=utf-8" -Body ([Text.Encoding]::UTF8.GetBytes($body)) -TimeoutSec 6 | Out-Null
         return $true
     } catch {
@@ -5212,10 +5513,10 @@ function Update-SchedUi {
     } else { $ui.SchedLinkText.Text = "Game: not set yet. Paste a link in the Accounts tab, then click the button below." }
     if ($script:State.schedOn -and $l -and (Test-TimeText $script:State.schedTime)) {
         $ui.SchedStatus.Text = "On. Next start: $($script:State.schedTime)" + $(if ($script:State.schedLastRun -eq (Get-Date -Format "yyyy-MM-dd")) { " tomorrow." } else { "." })
-        $ui.SchedStatus.Foreground = Brush "#5BE38B"
+        $ui.SchedStatus.Foreground = Brush "SuccessInk"
     } elseif ($script:State.schedOn) {
-        $ui.SchedStatus.Text = "Needs a game link and a time like 08:00."; $ui.SchedStatus.Foreground = Brush "#FDBA74"
-    } else { $ui.SchedStatus.Text = "Off."; $ui.SchedStatus.Foreground = Brush "#98A2B3" }
+        $ui.SchedStatus.Text = "Needs a game link and a time like 08:00."; $ui.SchedStatus.Foreground = Brush "CautionInk"
+    } else { $ui.SchedStatus.Text = "Off."; $ui.SchedStatus.Foreground = Brush "Muted" }
 }
 function Check-Schedule {
     if (-not $script:State.schedOn -or -not $script:State.schedLink) { return }
@@ -5235,15 +5536,15 @@ function Check-Schedule {
             return
         }
         Say "Scheduled start: starting everything now."
-        Send-Webhook "Roblox Manager: scheduled start is running now."
+        Send-Webhook "BloxKit: scheduled start is running now."
         if ($script:QBusy) { return }
         Start-Everything -LinkOverride $script:State.schedLink -Silent
         Update-SchedUi
     }
 }
-$StartupLnk = Join-Path ([Environment]::GetFolderPath("Startup")) "Roblox Manager.lnk"
+$StartupLnk = Join-Path ([Environment]::GetFolderPath("Startup")) "BloxKit.lnk"
 function Get-AppCommand {
-    # How to start this app again: RobloxManager.exe when it was opened from there, otherwise PowerShell (like the .bat).
+    # How to start this app again: BloxKit.exe when it was opened from there, otherwise PowerShell (like the .bat).
     if ($env:RML_LAUNCHER -and (Test-Path -LiteralPath $env:RML_LAUNCHER)) { return @{ File = $env:RML_LAUNCHER; Args = "" } }
     return @{ File = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
               Args = "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$PSCommandPath`"" }
@@ -5257,13 +5558,13 @@ function Set-RunAtStartup([bool]$on, [switch]$Quiet) {
             $lnk.TargetPath = $cmd.File
             $lnk.Arguments = ($cmd.Args + " -Minimized").Trim()
             $lnk.WorkingDirectory = $PSScriptRoot
-            $lnk.Description = "Roblox Manager"
+            $lnk.Description = "BloxKit"
             if (Test-Path -LiteralPath $IconFile) { $lnk.IconLocation = $IconFile }
             $lnk.Save()
-            if (-not $Quiet) { Say "Roblox Manager will open (in the tray) when Windows starts." }
+            if (-not $Quiet) { Say "BloxKit will open (in the tray) when Windows starts." }
         } elseif (Test-Path $StartupLnk) {
             Remove-Item $StartupLnk -Force
-            Say "Roblox Manager won't open with Windows anymore."
+            Say "BloxKit won't open with Windows anymore."
         }
     } catch { Say "Couldn't change the Windows startup setting." }
 }
@@ -5278,7 +5579,7 @@ function Get-ProfileNames {
 function Export-Backup {
     Save-Settings
     $dlg = New-Object Microsoft.Win32.SaveFileDialog
-    $dlg.FileName = "RobloxManager-backup-" + (Get-Date -Format "yyyy-MM-dd") + ".json"
+    $dlg.FileName = "BloxKit-backup-" + (Get-Date -Format "yyyy-MM-dd") + ".json"
     $dlg.Filter = "Backup file (*.json)|*.json"
     if (-not $dlg.ShowDialog($win)) { return }
     try {
@@ -5292,21 +5593,21 @@ function Import-Backup {
     $dlg.Filter = "Backup file (*.json)|*.json"
     if (-not $dlg.ShowDialog($win)) { return }
     $r = Read-BackupFile $dlg.FileName $script:State $ChromeData (Get-ProfileNames)
-    if (-not $r.Ok) { [System.Windows.MessageBox]::Show($r.Error, "Load backup", "OK", "Warning") | Out-Null; return }
+    if (-not $r.Ok) { [BkBox]::Show($r.Error, "Load backup", "OK", "Warning") | Out-Null; return }
     $msg = "Load this backup with $(@($r.State.accounts).Count) account(s)?`n`nIt replaces your current accounts and settings. Your current ones are saved first as a copy in the settings folder. The app will restart."
     if (@($r.NeedSignIn).Count) {
         $msg += "`n`nThese accounts don't have their Chrome profile on this PC, so they'll need to sign in once: " + (@($r.NeedSignIn) -join ", ") + ".`nThe app will walk you through it after the restart."
     }
     if (@($r.Warnings).Count) { $msg += "`n`nPlease check:`n- " + (@($r.Warnings) -join "`n- ") }
-    $ans = [System.Windows.MessageBox]::Show($msg, "Load backup", "YesNo", "Question")
+    $ans = [BkBox]::Show($msg, "Load backup", "YesNo", "Question")
     if ($ans -ne "Yes") { return }
     if (Test-Path -LiteralPath $SettingsFile) {
         $keep = Join-Path $AppDir ("settings.before-import-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".json")
         try { Copy-Item -LiteralPath $SettingsFile $keep -ErrorAction Stop }
-        catch { [System.Windows.MessageBox]::Show("Couldn't keep a copy of your current settings, so nothing was changed.`n`n$($_.Exception.Message)", "Load backup", "OK", "Warning") | Out-Null; return }
+        catch { [BkBox]::Show("Couldn't keep a copy of your current settings, so nothing was changed.`n`n$($_.Exception.Message)", "Load backup", "OK", "Warning") | Out-Null; return }
     }
     $err = Write-SettingsFile $r.State $SettingsFile
-    if ($err) { [System.Windows.MessageBox]::Show("Couldn't load the backup, nothing was changed.`n`n$err", "Load backup", "OK", "Warning") | Out-Null; return }
+    if ($err) { [BkBox]::Show("Couldn't load the backup, nothing was changed.`n`n$err", "Load backup", "OK", "Warning") | Out-Null; return }
     $script:SkipSave = $true
     Release-Instance   # let the restarted copy start
     $cmd = Get-AppCommand
@@ -5322,13 +5623,13 @@ function Update-Status {
     $running = Get-RobloxCount
     if (-not $NoRoblox -and $script:Locks.Count -eq 0 -and $running -eq 0 -and (Grab-Locks)) { Say "Multi-window is ON now (no Roblox was running)." }
     if ($script:Locks.Count -gt 0) {
-        $ui.StatusPill.Background = Brush "#163322"
-        $ui.StatusText.Text = "Multi-window ON"; $ui.StatusText.Foreground = Brush "#5BE38B"; $ui.StatusDot.Fill = Brush "#5BE38B"
+        $ui.StatusPill.Background = Brush "SuccessBg"
+        $ui.StatusText.Text = "Multi-window ON"; $ui.StatusText.Foreground = Brush "SuccessInk"; $ui.StatusDot.Fill = Brush "SuccessInk"
         $ui.StatusPill.ToolTip = "You can open as many Roblox windows as you want."
         $ui.FixBtn.Visibility = "Collapsed"
     } else {
-        $ui.StatusPill.Background = Brush "#3A2412"
-        $ui.StatusText.Text = "Multi-window OFF"; $ui.StatusText.Foreground = Brush "#FDBA74"; $ui.StatusDot.Fill = Brush "#FDBA74"
+        $ui.StatusPill.Background = Brush "CautionBg"
+        $ui.StatusText.Text = "Multi-window OFF"; $ui.StatusText.Foreground = Brush "CautionInk"; $ui.StatusDot.Fill = Brush "CautionInk"
         $hidden = $running - $script:Wins.Count
         $ui.StatusPill.ToolTip = $(if ($running -gt 0) {
             "$running Roblox program(s) were already running, so new accounts take over the open window instead of getting their own. " +
@@ -5342,13 +5643,15 @@ function Update-Status {
 # ================================================================= TRAY ==
 $Tray = New-Object System.Windows.Forms.NotifyIcon
 $Tray.Icon = $(try { New-Object System.Drawing.Icon($IconFile, [System.Windows.Forms.SystemInformation]::SmallIconSize) } catch { ([type]"System.Drawing.SystemIcons")::Application })
-$Tray.Text = "Roblox Manager"
+$Tray.Text = "BloxKit"
 $TrayMenu = New-Object System.Windows.Forms.ContextMenuStrip
-$TrayOpen = $TrayMenu.Items.Add("Open Roblox Manager")
+$TrayOpen = $TrayMenu.Items.Add("Open BloxKit")
 $TrayAfkItem = $TrayMenu.Items.Add("Turn anti-AFK ON")
 $TrayJump = $TrayMenu.Items.Add("Anti-AFK: do it now")
 $TrayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
 $TrayExit = $TrayMenu.Items.Add("Exit")
+$TrayMenu.Renderer = New-Object System.Windows.Forms.ToolStripProfessionalRenderer((New-Object BkMenuColors))
+foreach ($it in $TrayMenu.Items) { $it.ForeColor = [System.Drawing.ColorTranslator]::FromHtml($BkTokens.Cloud) }
 $Tray.ContextMenuStrip = $TrayMenu
 $TrayOpen.Add_Click({ Show-App })
 $TrayAfkItem.Add_Click({ Set-Afk (-not $script:AfkOn) })
@@ -5438,7 +5741,7 @@ function Ask-GroupName([string]$title, [string]$default, $except) {
         if (-not $name) { return "" }
         $err = Test-GroupName $script:State $name $except
         if (-not $err) { return $name.Trim() }
-        [System.Windows.MessageBox]::Show($err, $title, "OK", "Information") | Out-Null
+        [BkBox]::Show($err, $title, "OK", "Information") | Out-Null
     }
 }
 $ui.GNewBtn.Add_Click({
@@ -5512,7 +5815,7 @@ $ui.SStartBtn.Add_Click({ Start-Plan })
 $ui.SPauseBtn.Add_Click({ if (Test-PlanCan $script:Run "resume" $script:State.plan) { Invoke-Plan "resume" } else { Invoke-Plan "pause" } })
 $ui.SNextBtn.Add_Click({ Invoke-Plan "next" })
 $ui.SStopBtn.Add_Click({
-    $r = [System.Windows.MessageBox]::Show("Stop the schedule?`n`nYes = stop, and close the schedule's Roblox windows`nNo = stop, but leave them open`nCancel = keep going", "Stop schedule", "YesNoCancel", "Question")
+    $r = [BkBox]::Show("Stop the schedule?`n`nYes = stop, and close the schedule's Roblox windows`nNo = stop, but leave them open`nCancel = keep going", "Stop schedule", "YesNoCancel", "Question")
     if ($r -eq "Cancel") { return }
     Invoke-Plan "stop" ($r -eq "Yes")
 })
@@ -5563,7 +5866,7 @@ $ui.AlertRejoinBtn.Add_Click({
 # Status
 $ui.FixBtn.Add_Click({
     if ($NoRoblox) { Say "(test mode) Roblox isn't closed."; return }
-    $r = [System.Windows.MessageBox]::Show("This closes every Roblox window that's open now. Continue?", "Close Roblox", "YesNo", "Question")
+    $r = [BkBox]::Show("This closes every Roblox window that's open now. Continue?", "Close Roblox", "YesNo", "Question")
     if ($r -ne "Yes") { return }
     foreach ($w in $script:Wins) { [void]$script:ExpectedClose.Add($w.Handle.ToInt64()) }
     Get-Process -Name "RobloxPlayerBeta" -ErrorAction SilentlyContinue | Stop-Process -Force
@@ -5615,7 +5918,7 @@ $ui.MuteAltsBtn.Add_Click({
 $ui.UnmuteAllBtn.Add_Click({ foreach ($w in $script:Wins) { Set-Mute $w $false -Quiet }; Say "Sound back on for all windows." })
 $ui.CloseAllBtn.Add_Click({
     if ($script:Wins.Count -eq 0) { Say "No Roblox windows are open."; return }
-    $r = [System.Windows.MessageBox]::Show("Close ALL $($script:Wins.Count) Roblox windows?", "Close all", "YesNo", "Warning")
+    $r = [BkBox]::Show("Close ALL $($script:Wins.Count) Roblox windows?", "Close all", "YesNo", "Warning")
     if ($r -ne "Yes") { return }
     foreach ($w in @($script:Wins)) { Close-RobloxWindow $w -NoAsk }
 })
@@ -5659,7 +5962,7 @@ $ui.TabCloseBox.Add_SelectionChanged({
 })
 function Update-TabCloseLine {
     # With tab closing off, say so plainly (the most common reason a launch tab stays open).
-    if ($script:State.tabCloseWhen -eq "off") { $ui.TabCloseLast.Text = "Tab closing is off, so launch tabs stay open. Pick 'When it's in a game' to turn it on."; $ui.TabCloseLast.Foreground = Brush "#98A2B3" }
+    if ($script:State.tabCloseWhen -eq "off") { $ui.TabCloseLast.Text = "Tab closing is off, so launch tabs stay open. Pick 'When it's in a game' to turn it on."; $ui.TabCloseLast.Foreground = Brush "Muted" }
     elseif ($ui.TabCloseLast.Text -match '^Tab closing is off') { $ui.TabCloseLast.Text = "Last launch tab: none yet." }
 }
 Update-TabCloseLine
@@ -5673,6 +5976,11 @@ $ui.TrayBox.IsChecked = $State.trayOnMinimize
 $ui.SoundBox.Add_Click({ $script:State.alertSound = [bool]$ui.SoundBox.IsChecked; Save-Settings })
 $ui.AutoRejoinBox.Add_Click({ $script:State.autoRejoin = [bool]$ui.AutoRejoinBox.IsChecked; Save-Settings })
 $ui.AutoMuteBox.Add_Click({ $script:State.autoMuteAlts = [bool]$ui.AutoMuteBox.IsChecked; Save-Settings })
+$ui.AnimBox.IsChecked = $State.animations
+$ui.AnimBox.Add_Click({
+    $script:State.animations = [bool]$ui.AnimBox.IsChecked; Save-Settings
+    Say $(if (-not $script:State.animations) { "Animations are off." } elseif (Test-Motion) { "Animations are on." } else { "Animations are on here, but Windows' own animations are off, so they stay off." })
+})
 $ui.TrayBox.Add_Click({ $script:State.trayOnMinimize = [bool]$ui.TrayBox.IsChecked; Save-Settings })
 $ui.OpenFolderBtn.Add_Click({ Start-Process explorer.exe $AppDir })
 
@@ -5700,9 +6008,9 @@ $ui.HookBox.Text = $State.webhook
 $ui.HookDoneBox.IsChecked = $State.webhookOnDone
 function Update-HookStatus {
     $u = $ui.HookBox.Text.Trim()
-    if ($u -eq "") { $ui.HookStatus.Text = "Not set."; $ui.HookStatus.Foreground = Brush "#98A2B3" }
-    elseif (Test-HookUrl $u) { $ui.HookStatus.Text = [string][char]0x2713 + "  Looks like a Discord webhook link."; $ui.HookStatus.Foreground = Brush "#5BE38B" }
-    else { $ui.HookStatus.Text = [string][char]0x26A0 + "  That isn't a Discord webhook link."; $ui.HookStatus.Foreground = Brush "#F87171" }
+    if ($u -eq "") { $ui.HookStatus.Text = "Not set."; $ui.HookStatus.Foreground = Brush "Muted" }
+    elseif (Test-HookUrl $u) { $ui.HookStatus.Text = [string][char]0x2713 + "  Looks like a Discord webhook link."; $ui.HookStatus.Foreground = Brush "SuccessInk" }
+    else { $ui.HookStatus.Text = [string][char]0x26A0 + "  That isn't a Discord webhook link."; $ui.HookStatus.Foreground = Brush "DangerInk" }
 }
 $ui.HookBox.Add_TextChanged({ Update-HookStatus })
 $ui.HookSaveBtn.Add_Click({
@@ -5714,7 +6022,7 @@ $ui.HookSaveBtn.Add_Click({
 $ui.HookTestBtn.Add_Click({
     $script:State.webhook = $ui.HookBox.Text.Trim(); Save-Settings
     if (-not (Test-HookUrl $script:State.webhook)) { Say "Paste a Discord webhook link first."; return }
-    if (Send-Webhook "Hi! This is a test from Roblox Manager. Alerts will show up here.") { Say "Test message sent. Check Discord!" }
+    if (Send-Webhook "Hi! This is a test from BloxKit. Alerts will show up here.") { Say "Test message sent. Check Discord!"; Show-MascotMoment "Success" "Test message sent to Discord." }
 })
 $ui.HookDoneBox.Add_Click({ $script:State.webhookOnDone = [bool]$ui.HookDoneBox.IsChecked; Save-Settings })
 
@@ -5737,8 +6045,10 @@ $ui.SchedUseLinkBtn.Add_Click({
     $script:State.schedLink = $info.Url; Save-Settings; Update-SchedUi
     Say "Scheduled start will use this game."
 })
+$OldStartupLnk = Join-Path ([Environment]::GetFolderPath("Startup")) "Roblox Manager.lnk"   # the app's name before BloxKit
+if (-not $NoRoblox -and (Test-Path $OldStartupLnk)) { Remove-Item $OldStartupLnk -Force -ErrorAction SilentlyContinue; Set-RunAtStartup $true -Quiet }
 $ui.StartupBox.IsChecked = (Test-Path $StartupLnk)
-# Opened from RobloxManager.exe: an older startup shortcut (PowerShell) is switched over to it.
+# Opened from BloxKit.exe: an older startup shortcut (PowerShell) is switched over to it.
 if (-not $NoRoblox -and $env:RML_LAUNCHER -and (Test-Path $StartupLnk) -and
     (New-Object -ComObject WScript.Shell).CreateShortcut($StartupLnk).TargetPath -ne $env:RML_LAUNCHER) { Set-RunAtStartup $true -Quiet }
 $ui.StartupBox.Add_Click({ Set-RunAtStartup ([bool]$ui.StartupBox.IsChecked); $ui.StartupBox.IsChecked = (Test-Path $StartupLnk) })
@@ -5765,7 +6075,7 @@ $win.Add_StateChanged({
     if ($win.WindowState -eq "Minimized" -and $script:State.trayOnMinimize) {
         $win.Hide()
         if (-not $script:TrayTipShown) {
-            $Tray.ShowBalloonTip(4000, "Roblox Manager", "Still running here. Double-click this icon to open it again.", [System.Windows.Forms.ToolTipIcon]::Info)
+            $Tray.ShowBalloonTip(4000, "BloxKit", "Still running here. Double-click this icon to open it again.", [System.Windows.Forms.ToolTipIcon]::Info)
             $script:TrayTipShown = $true
         }
     }
@@ -5774,7 +6084,7 @@ $win.Add_StateChanged({
 $win.Add_Closing({
     param($s, $e)
     if ($script:QBusy -and -not $script:ReallyExit) {
-        $r = [System.Windows.MessageBox]::Show("Accounts are still opening. Close anyway?", "Roblox Manager", "YesNo", "Question")
+        $r = [BkBox]::Show("Accounts are still opening. Close anyway?", "BloxKit", "YesNo", "Question")
         if ($r -ne "Yes") { $e.Cancel = $true; return }
     }
     $QueueTimer.Stop(); $Tick.Stop(); $Keys.Stop(); $TabTimer.Stop()
@@ -5799,6 +6109,7 @@ $Tick = New-Object System.Windows.Threading.DispatcherTimer
 $Tick.Interval = [TimeSpan]::FromSeconds(1)
 $Tick.Add_Tick({
     $script:TickCount++
+    Update-Mascot   # the mascot and its line follow what's really happening
     if ($NoRoblox) {   # tests: no Roblox windows, only the schedule's clock
         if ($script:ShowSignal.WaitOne(0)) { Show-App }
         if (Test-PlanActive) { Invoke-Plan "tick"; if ($ui.TabSchedule.IsSelected) { Update-ScheduleLive } }
@@ -5873,12 +6184,12 @@ $Keys.Add_Tick({
 # ================================================================= START ==
 function Show-StartupNotes {
     if ($script:SettingsLocked) {
-        $r = [System.Windows.MessageBox]::Show(
+        $r = [BkBox]::Show(
             "Your settings file couldn't be read:`n$SettingsFile`n($($script:LoadError))`n`n" +
             "To keep your accounts safe, nothing is saved while it's like this.`n`n" +
             "Yes = start fresh. The unreadable file is kept next to it (settings.unreadable-...json) so it can still be recovered.`n" +
             "No = leave it. Fix or replace the file (Settings > Open settings folder), then restart the app.",
-            "Roblox Manager", "YesNo", "Warning")
+            "BloxKit", "YesNo", "Warning")
         if ($r -eq "Yes") {
             $keep = Join-Path $AppDir ("settings.unreadable-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".json")
             try {
@@ -5890,7 +6201,7 @@ function Show-StartupNotes {
         return
     }
     if ($script:LoadNote) {
-        [System.Windows.MessageBox]::Show("Some things in your settings were fixed while loading:`n`n- " + ($script:LoadNote -replace "`n", "`n- "), "Roblox Manager", "OK", "Information") | Out-Null
+        [BkBox]::Show("Some things in your settings were fixed while loading:`n`n- " + ($script:LoadNote -replace "`n", "`n- "), "BloxKit", "OK", "Information") | Out-Null
         Save-Settings
     }
     if ($script:Run.State -eq "paused" -and $script:State.planRun -and $script:State.planRun.State -ne "paused") {
@@ -5898,7 +6209,7 @@ function Show-StartupNotes {
     }
     $need = @($script:State.accounts | Where-Object { $_.needsLogin })
     if ($need.Count) {
-        $r = [System.Windows.MessageBox]::Show(
+        $r = [BkBox]::Show(
             "$($need.Count) account(s) need to sign in to Roblox once on this PC: " + (($need | ForEach-Object { $_.nick }) -join ", ") + ".`n`n" +
             "Their Chrome profiles are new here (logins stay in Chrome on the old PC, not in the backup).`n`nSign them in now, one at a time?",
             "Sign in", "YesNo", "Question")
@@ -5935,6 +6246,8 @@ if ($State.winWidth -ge $win.MinWidth -and $State.winHeight -ge $win.MinHeight) 
     $win.Width = [Math]::Min($State.winWidth, $wa.Width); $win.Height = [Math]::Min($State.winHeight, $wa.Height)
 }
 if ($State.winMax) { $win.WindowState = "Maximized" }
+Update-Mascot
+$win.Add_ContentRendered({ if (-not $script:IntroDone) { $script:IntroDone = $true; Start-Intro } })   # once, when the window first appears
 $win.Show()
 if ($Minimized) { $win.WindowState = "Minimized" }
 Show-StartupNotes

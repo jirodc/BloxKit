@@ -1,7 +1,7 @@
-# Checks how Roblox Manager saves, loads, renames and backs up accounts (no app window).
+# Checks how BloxKit saves, loads, renames and backs up accounts (no app window).
 #     powershell -ExecutionPolicy Bypass -File tools\check-settings.ps1
 # Works in a temporary folder; never touches your real settings.
-. (Join-Path $PSScriptRoot "..\RobloxManager.ps1") -TestOnly
+. (Join-Path $PSScriptRoot "..\BloxKit.ps1") -TestOnly
 
 $Dir = Join-Path ([IO.Path]::GetTempPath()) ("rml-check-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
 New-Item -ItemType Directory -Path $Dir | Out-Null

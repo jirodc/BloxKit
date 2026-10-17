@@ -1,7 +1,7 @@
 // Checks the helper's tab closing in a real Chrome, end to end:
 //     node tools\check-tabclose.mjs
 // Needs Node 22+ and Google Chrome. Opens Chrome hidden with a throwaway profile, loads the
-// helper the supported way (DevTools Extensions.loadUnpacked), and plays Roblox Manager's part
+// helper the supported way (DevTools Extensions.loadUnpacked), and plays BloxKit's part
 // with a tiny local server. Logged out, so nothing is launched.
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
@@ -19,7 +19,7 @@ const chrome = ["C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
 if (!chrome) { console.log("Chrome not found."); process.exit(2); }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// ---- Roblox Manager's part ----
+// ---- BloxKit's part ----
 const op = { close: randomUUID(), keep: randomUUID(), priv: randomUUID(), auto: randomUUID() };
 const asked = {};          // op -> number of times asked
 const seen = [];           // { origin, v }
@@ -85,7 +85,7 @@ try {
   for (let i = 0; i < 40 && (open1.has(t.close) || open1.has(t.auto)); i++) { await sleep(1000); open1 = await alive(); }
 
   check("the tab of a launch that worked is closed", !open1.has(t.close), `asked ${asked[op.close] || 0} times`);
-  check("it was only closed after Roblox Manager said so (asked 3+ times)", (asked[op.close] || 0) >= 3);
+  check("it was only closed after BloxKit said so (asked 3+ times)", (asked[op.close] || 0) >= 3);
   check("with auto-join on too, the tab is closed", !open1.has(t.auto), `asked ${asked[op.auto] || 0} times`);
   check("the tab of a launch that failed stays open", open1.has(t.keep) && (asked[op.keep] || 0) >= 1);
   check("an unrelated roblox.com tab stays open", open1.has(t.other));

@@ -1,5 +1,5 @@
-// Roblox Manager Auto-Join Helper: background part (v2.2)
-// Keeps a list of tabs opened by Roblox Manager for a launch, and asks Roblox Manager
+// BloxKit Auto-Join Helper: background part (v2.2)
+// Keeps a list of tabs opened by BloxKit for a launch, and asks BloxKit
 // (http://127.0.0.1:<port>, this PC only) about each one every 2 seconds:
 //   "wait"  -> ask again later
 //   "close" -> the launch worked: close THIS tab (only if it is still on roblox.com)
@@ -63,7 +63,7 @@ async function pollAll() {
     if (now - e.since > GIVE_UP_MS) { delete tabs[id]; done[e.op] = now; continue; }
     let state;
     try { state = await ask(e); e.fails = 0; }
-    catch { if (++e.fails >= MAX_FAILS) { delete tabs[id]; done[e.op] = now; } continue; }   // Roblox Manager not answering
+    catch { if (++e.fails >= MAX_FAILS) { delete tabs[id]; done[e.op] = now; } continue; }   // BloxKit not answering
     if (state === "wait") continue;
     if (state === "close" && ROBLOX.test(tab.url || "")) { try { await chrome.tabs.remove(tab.id); } catch {} }
     delete tabs[id]; done[e.op] = now;

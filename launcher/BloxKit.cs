@@ -1,6 +1,6 @@
-// RobloxManager.exe: opens Roblox Manager as its own app (its own taskbar icon,
-// pinnable, "Roblox Manager" in Task Manager) with no console window.
-// It runs RobloxManager.ps1 from the same folder inside this process, using the
+// BloxKit.exe: opens BloxKit as its own app (its own taskbar icon,
+// pinnable, "BloxKit" in Task Manager) with no console window.
+// It runs BloxKit.ps1 from the same folder inside this process, using the
 // PowerShell that comes with Windows, so the script stays readable and editable.
 // Build it with tools\build-app.ps1.
 using System;
@@ -11,8 +11,8 @@ using System.Windows.Forms;
 using System.Management.Automation;
 using System.Management.Automation.Runspaces;
 
-[assembly: AssemblyTitle("Roblox Manager")]
-[assembly: AssemblyProduct("Roblox Manager")]
+[assembly: AssemblyTitle("BloxKit")]
+[assembly: AssemblyProduct("BloxKit")]
 [assembly: AssemblyDescription("Open several Roblox accounts, watch them, and keep them from going idle.")]
 [assembly: AssemblyVersion("1.0.0.0")]
 [assembly: AssemblyFileVersion("1.0.0.0")]
@@ -23,11 +23,11 @@ static class Program
     static int Main(string[] args)
     {
         string exe = Application.ExecutablePath;
-        string script = Path.Combine(Path.GetDirectoryName(exe), "RobloxManager.ps1");
+        string script = Path.Combine(Path.GetDirectoryName(exe), "BloxKit.ps1");
         if (!File.Exists(script))
         {
-            MessageBox.Show("RobloxManager.ps1 wasn't found next to this app:\n" + script +
-                "\n\nKeep RobloxManager.exe in the same folder as the other files.", "Roblox Manager",
+            MessageBox.Show("BloxKit.ps1 wasn't found next to this app:\n" + script +
+                "\n\nKeep BloxKit.exe in the same folder as the other files.", "BloxKit",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
             return 1;
         }
@@ -61,7 +61,7 @@ static class Program
             {
                 Exception inner = e;
                 while (inner.InnerException != null) inner = inner.InnerException;
-                MessageBox.Show("Sorry, Roblox Manager couldn't start:\n\n" + inner.Message, "Roblox Manager",
+                MessageBox.Show("Sorry, BloxKit couldn't start:\n\n" + inner.Message, "BloxKit",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             return 1;

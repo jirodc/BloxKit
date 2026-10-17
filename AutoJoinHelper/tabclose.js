@@ -1,9 +1,9 @@
-// Roblox Manager Auto-Join Helper: tab closing (v2.2)
-// Only acts on pages opened by Roblox Manager with a launch id: #rml-launch&op=<id>&port=<n>
+// BloxKit Auto-Join Helper: tab closing (v2.2)
+// Only acts on pages opened by BloxKit with a launch id: #rml-launch&op=<id>&port=<n>
 // (or #rml-autojoin&...&op=<id>&port=<n> when auto-join is on).
 // It tells the helper's background part which tab belongs to that launch. The background
-// asks Roblox Manager (on this PC only) whether the launch worked, and closes only this
-// tab when Roblox Manager says so. Nothing is closed when the launch fails or can't be confirmed.
+// asks BloxKit (on this PC only) whether the launch worked, and closes only this
+// tab when BloxKit says so. Nothing is closed when the launch fails or can't be confirmed.
 //
 // Runs before Roblox's own scripts (document_start), in the extension's own space, so it can
 // talk to the background part. Either this script or autojoin.js may run first: whichever

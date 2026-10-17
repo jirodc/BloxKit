@@ -4,7 +4,7 @@
 #     powershell -ExecutionPolicy Bypass -File tools\measure-load.ps1 -Seconds 120
 # It only reads; it changes nothing. The report is also saved on your Desktop.
 param([int]$Seconds = 60, [int]$Every = 5)
-. (Join-Path $PSScriptRoot "..\RobloxManager.ps1") -TestOnly
+. (Join-Path $PSScriptRoot "..\BloxKit.ps1") -TestOnly
 Add-Type -AssemblyName System.Windows.Forms
 
 $lines = New-Object System.Collections.ArrayList
@@ -20,9 +20,9 @@ $graphics = $(if ($gbs) { Read-RobloxGraphics ([IO.File]::ReadAllText($gbs.FullN
 $pref = @()
 $k = "HKCU:\Software\Microsoft\DirectX\UserGpuPreferences"
 if (Test-Path $k) { $pref = @((Get-ItemProperty $k).PSObject.Properties | Where-Object { $_.Name -match 'Roblox' } | ForEach-Object { "$($_.Name) = $($_.Value)" }) }
-# The app: RobloxManager.exe, or PowerShell running RobloxManager.ps1 (the .bat). Test copies (-NoRoblox) don't count.
-$mgr = @(Get-CimInstance Win32_Process -Filter "Name='RobloxManager.exe' OR Name='powershell.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { ($_.Name -eq 'RobloxManager.exe' -or $_.CommandLine -match 'RobloxManager\.ps1') -and $_.CommandLine -notmatch 'NoRoblox|measure-load' }) | Select-Object -First 1
+# The app: BloxKit.exe, or PowerShell running BloxKit.ps1 (the .bat). Test copies (-NoRoblox) don't count.
+$mgr = @(Get-CimInstance Win32_Process -Filter "Name='BloxKit.exe' OR Name='powershell.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { ($_.Name -eq 'BloxKit.exe' -or $_.CommandLine -match 'BloxKit.ps1') -and $_.CommandLine -notmatch 'NoRoblox|measure-load' }) | Select-Object -First 1
 
 Out-Line "ROBLOX MANAGER - LOAD MEASUREMENT  $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
 Out-Line "Processor:   $cpuName ($([Environment]::ProcessorCount) threads)"
@@ -57,7 +57,7 @@ Out-Line ("  Memory:                {0}" -f $(if ($null -ne $f.RamFreeGB) { "{0:
 Out-Line ("  Swapping to disk:      {0}" -f $(if ($null -ne $f.PagesPerSec) { "{0:N0} pages/s at the most" -f $f.PagesPerSec } else { "not available" }))
 if ($f.Adapters) { foreach ($a in $f.Adapters) { Out-Line ("  {0}: {1:N0}% busy on average, {2} client(s) on it" -f $a.Name, $a.BusyPct, $a.RobloxCount) } }
 else { Out-Line "  Graphics use:          not available (Windows didn't give GPU counters)" }
-Out-Line ("  Roblox Manager itself: {0}" -f $(if ($null -ne $f.ManagerCpuPct) { "{0:N2}% of the processor" -f $f.ManagerCpuPct } else { "not running" }))
+Out-Line ("  BloxKit itself: {0}" -f $(if ($null -ne $f.ManagerCpuPct) { "{0:N2}% of the processor" -f $f.ManagerCpuPct } else { "not running" }))
 $ch = $comparisons[-1].Chrome
 if ($ch) { Out-Line ("  Chrome:                {0} processes, {1:N1} GB" -f $ch.Count, ($ch.MemMB / 1024)) }
 Out-Line ""
@@ -81,7 +81,7 @@ if ($find.Count) {
 } else { Out-Line "Nothing is maxed out in this measurement. If it still lags, measure again while it lags." }
 
 $desk = [Environment]::GetFolderPath("Desktop")
-$file = Join-Path $(if ($desk -and (Test-Path $desk)) { $desk } else { $PSScriptRoot }) ("RobloxManager-load-" + (Get-Date -Format "yyyyMMdd-HHmm") + ".txt")
+$file = Join-Path $(if ($desk -and (Test-Path $desk)) { $desk } else { $PSScriptRoot }) ("BloxKit-load-" + (Get-Date -Format "yyyyMMdd-HHmm") + ".txt")
 [IO.File]::WriteAllLines($file, [string[]]$lines)
 ""
 "Saved: $file"

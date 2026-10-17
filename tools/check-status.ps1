@@ -1,8 +1,8 @@
-# Checks how Roblox Manager tells what a Roblox window is doing (from Roblox's log),
+# Checks how BloxKit tells what a Roblox window is doing (from Roblox's log),
 # which launch a new window belongs to, and how a Chrome profile is set up.
 #     powershell -ExecutionPolicy Bypass -File tools\check-status.ps1
 # No app window, no network, no real Chrome or Roblox files.
-. (Join-Path $PSScriptRoot "..\RobloxManager.ps1") -TestOnly
+. (Join-Path $PSScriptRoot "..\BloxKit.ps1") -TestOnly
 
 $script:fails = 0
 $ErrorActionPreference = "Stop"

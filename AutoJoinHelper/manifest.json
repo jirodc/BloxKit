@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Roblox Manager Auto-Join Helper",
+  "name": "BloxKit Auto-Join Helper",
   "version": "2.2",
-  "description": "Starts the game for you, and closes the launch tab once Roblox Manager confirms it worked. Only on pages opened by Roblox Manager.",
+  "description": "Starts the game for you, and closes the launch tab once BloxKit confirms it worked. Only on pages opened by BloxKit.",
   "minimum_chrome_version": "116",
   "background": { "service_worker": "background.js" },
   "permissions": ["storage", "alarms"],

@@ -1,7 +1,7 @@
-# Checks Roblox Manager's groups: creating, renaming, members, summaries, and the account filter.
+# Checks BloxKit's groups: creating, renaming, members, summaries, and the account filter.
 #     powershell -ExecutionPolicy Bypass -File tools\check-groups.ps1
 # No app window, no files.
-. (Join-Path $PSScriptRoot "..\RobloxManager.ps1") -TestOnly
+. (Join-Path $PSScriptRoot "..\BloxKit.ps1") -TestOnly
 
 $script:fails = 0
 $ErrorActionPreference = "Stop"

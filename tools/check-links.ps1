@@ -1,6 +1,6 @@
-# Checks how Roblox Manager reads pasted links (no app window, no network).
+# Checks how BloxKit reads pasted links (no app window, no network).
 #     powershell -ExecutionPolicy Bypass -File tools\check-links.ps1
-. (Join-Path $PSScriptRoot "..\RobloxManager.ps1") -TestOnly
+. (Join-Path $PSScriptRoot "..\BloxKit.ps1") -TestOnly
 
 $cases = @(
     # link                                                                         kind       user id

@@ -1,5 +1,5 @@
-// Roblox Manager Auto-Join Helper  (v2)
-// Only acts on pages opened by Roblox Manager (the link ends with #rml-autojoin).
+// BloxKit Auto-Join Helper  (v2)
+// Only acts on pages opened by BloxKit (the link ends with #rml-autojoin).
 // It starts the game once, then stops. Nothing else.
 //
 // How it works:

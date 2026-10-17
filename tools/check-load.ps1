@@ -1,7 +1,7 @@
-﻿# Checks how Roblox Manager reads Roblox's graphics settings and turns load measurements into advice.
+﻿# Checks how BloxKit reads Roblox's graphics settings and turns load measurements into advice.
 #     powershell -ExecutionPolicy Bypass -File tools\check-load.ps1
 # No app window; made-up measurements.
-. (Join-Path $PSScriptRoot "..\RobloxManager.ps1") -TestOnly
+. (Join-Path $PSScriptRoot "..\BloxKit.ps1") -TestOnly
 
 $script:fails = 0
 $ErrorActionPreference = "Stop"
@@ -36,7 +36,7 @@ try {
     $c = Compare-LoadReadings $a $b
     Check "each client: CPU share, memory, GPU" (@($c.Clients).Count -eq 2 -and [Math]::Round(($c.Clients | Where-Object { $_.Pid -eq 11 }).CpuPct, 1) -eq 10 -and ($c.Clients | Where-Object { $_.Pid -eq 11 }).MemMB -eq 1600 -and [Math]::Round(($c.Clients | Where-Object { $_.Pid -eq 11 }).GpuPct, 1) -eq 3)
     Check "totals: whole CPU 75% busy, 3 GB free, 500 pages/s" ([Math]::Round($c.CpuTotalPct) -eq 75 -and $c.RamFreeGB -eq 3 -and [Math]::Round($c.PagesPerSec) -eq 500)
-    Check "Chrome and Roblox Manager are counted separately" ($c.Chrome.Count -eq 2 -and $c.Chrome.MemMB -eq 550 -and [Math]::Round($c.Chrome.CpuPct, 1) -eq 1 -and [Math]::Round($c.Manager.CpuPct, 1) -eq 0.1)
+    Check "Chrome and BloxKit are counted separately" ($c.Chrome.Count -eq 2 -and $c.Chrome.MemMB -eq 550 -and [Math]::Round($c.Chrome.CpuPct, 1) -eq 1 -and [Math]::Round($c.Manager.CpuPct, 1) -eq 0.1)
     Check "graphics chip total and how many clients are on it" ([Math]::Round($c.GpuByAdapter[$luid].BusyPct, 1) -eq 5 -and $c.GpuByAdapter[$luid].RobloxCount -eq 2)
     $a.Gpu = $null
     Check "no GPU counters: GPU is 'not available', not 0" ($null -eq (Compare-LoadReadings $a $b).GpuByAdapter -and $null -eq ((Compare-LoadReadings $a $b).Clients | Select-Object -First 1).GpuPct)
@@ -49,7 +49,7 @@ try {
     $c2 = @{ Clients = @(@{ Pid = 1; CpuPct = 14; MemMB = 1600; GpuPct = 40; Luid = $L1 }, @{ Pid = 2; CpuPct = 8; MemMB = 1800; GpuPct = 50; Luid = $L2 })
              CpuTotalPct = 90; RamTotalGB = 16; RamFreeGB = 1; PagesPerSec = 900; Manager = @{ CpuPct = 0.4 }; GpuByAdapter = @{ $L1 = @{ BusyPct = 80; RobloxCount = 1 }; $L2 = @{ BusyPct = 100; RobloxCount = 1 } } }
     $s = ConvertTo-LoadFacts @($c1, $c2) $ads @{ Quality = 10; FpsCap = -1 } $true
-    Check "averages: whole CPU 85%, Roblox Manager 0.3%" ($s.Facts.CpuTotalPct -eq 85 -and [Math]::Round($s.Facts.ManagerCpuPct, 1) -eq 0.3)
+    Check "averages: whole CPU 85%, BloxKit 0.3%" ($s.Facts.CpuTotalPct -eq 85 -and [Math]::Round($s.Facts.ManagerCpuPct, 1) -eq 0.3)
     Check "worst moments: lowest free memory (1 GB), most swapping (900/s)" ($s.Facts.RamFreeGB -eq 1 -and $s.Facts.PagesPerSec -eq 900)
     Check "each graphics chip: name, average busy, built-in or not" (($s.Facts.Adapters | Where-Object { $_.Name -match "Radeon" }).Integrated -and ($s.Facts.Adapters | Where-Object { $_.Name -match "Radeon" }).BusyPct -eq 95 -and -not ($s.Facts.Adapters | Where-Object { $_.Name -match "NVIDIA" }).Integrated)
     Check "per client averages for the report" (($s.Clients | Where-Object { $_.Pid -eq 1 }).CpuPct -eq 12 -and ($s.Clients | Where-Object { $_.Pid -eq 1 }).GpuPct -eq 30 -and ($s.Clients | Where-Object { $_.Pid -eq 1 }).Adapter -match "NVIDIA")
@@ -113,7 +113,7 @@ try {
     $m = M; $m.Quality = 10; $m.Clients = 2
     Check "quality 10 with only 2 clients: no nagging" (-not ((Titles (Get-LoadFindings $m)) -match "graphics quality"))
     $m = M; $m.ManagerCpuPct = 6
-    Check "Roblox Manager itself busy: says so" ((Titles (Get-LoadFindings $m)) -match "Roblox Manager itself")
+    Check "BloxKit itself busy: says so" ((Titles (Get-LoadFindings $m)) -match "BloxKit itself")
     $m = M; $m.Adapters = $null; $m.Quality = $null
     $f = @(Get-LoadFindings $m)
     Check "no GPU numbers or settings: nothing made up" (-not ((Titles $f) -match "graphics"))
