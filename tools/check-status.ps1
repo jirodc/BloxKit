@@ -40,7 +40,7 @@ try {
     $e = Read-LogEvent $L.shutdown
     Check "'Connection closed by server' (288) is a disconnect: server shut down" ($e.Kind -eq "disc" -and $e.Code -eq "288" -and $e.Text -match "shut down")
     $e = Read-LogEvent $L.elsewhere
-    Check "'joined from another device' says so" ($e.Kind -eq "disc" -and $e.Text -match "somewhere else")
+    Check "'joined from another device' says so, as code 273 (the old window then closes by itself)" ($e.Kind -eq "disc" -and $e.Code -eq "273" -and $e.Text -match "somewhere else")
     $e = Read-LogEvent $L.idle
     Check "idle kick (278) says so" ($e.Kind -eq "disc" -and $e.Code -eq "278" -and $e.Text -match "idle")
     $e = Read-LogEvent $L.kickmsg

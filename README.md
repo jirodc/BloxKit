@@ -137,7 +137,9 @@ Saved links: paste a link, click **Save link**, give it a name. Pick it from **S
 
 ## Live screens
 
-Every Roblox window shows live in a grid. Screens are named after the account automatically (when opened from this app).
+Every Roblox window shows live in a grid. Screens are named after the account automatically (when opened from this app), and they're in the order of your accounts: your main is always #1, then the others as they are in the account list. The screen numbers (and Ctrl+Alt+1..9) follow that order, also after a rejoin.
+
+Sound follows the account, not the window: your main always opens with sound, and each other account keeps its own Mute (or follows "Mute alts automatically") when it opens again.
 
 On each screen:
 
@@ -173,6 +175,8 @@ Try it: **...** > **Test anti-AFK** on a screen. If the screen reacts, Hidden mo
 If a Roblox window closes by itself, a red bar appears at the top ("Alt2's Roblox window closed at 14:05") with a **Rejoin** button. Settings tab: turn on a sound, or "Rejoin automatically" (max 3 times in 10 minutes per account, so it never loops forever).
 
 Disconnects and kicks: the app reads each Roblox window's own log file (`%LOCALAPPDATA%\Roblox\logs`), so it knows within a few seconds when an account is kicked or loses connection, and why. Example: "Alt2 was disconnected at 14:05: kicked for being idle 20 minutes (278)." Leaving a game on purpose doesn't alert, and neither does a teleport. If a window's log can't be found, it falls back to checking the screen for Roblox's grey message box every 30 seconds.
+
+Joining another server: an account can only be in one server. When it joins from a new window (or you rejoin it somewhere else), Roblox disconnects its old window ("joined from another device", 273). BloxKit then closes that old window by itself, without an alert and without an automatic rejoin (which would knock the new one out).
 
 Same server: the log also says which server each account is in. Rejoin (by button or automatic) goes back to that same server. This needs the auto-join helper (version 2.1 or newer). Alts that follow your main keep following your main, and private servers use their private link. Settings > "Rejoin the same server when possible" turns this off.
 

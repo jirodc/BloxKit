@@ -113,6 +113,27 @@ try {
     $l = (Read-SettingsFile $g).State
     Check "older settings files: anti-AFK off, nothing picked, normal window" (-not $l.afkOn -and $l.rbxQuality -eq 0 -and @($l.afkOff).Count -eq 0 -and $l.winWidth -eq 0)
 
+    # ---- sound follows the account; screens follow the account list ----
+    $st = New-Defaults
+    $mn = New-Account "Main" "P1"; $mn.isMain = $true
+    $a1 = New-Account "Alt1" "P2"; $a2 = New-Account "Alt2" "P3"; $a3 = New-Account "Alt3" "P4"
+    $st.accounts = @($a1, $mn, $a2, $a3)   # the main isn't first in the list
+    $st.soundOff["main"] = $true; $st.soundOff["alt2"] = $true; $st.soundOff["alt3"] = $false
+    $st.autoMuteAlts = $true
+    Check "the main always opens with sound, even if it was muted before" (-not (Get-AccountMuted $st $mn))
+    Check "an alt keeps its own Mute (muted / not muted)" ((Get-AccountMuted $st $a2) -and -not (Get-AccountMuted $st $a3))
+    Check "an alt with no choice yet follows 'Mute alts automatically'" ((Get-AccountMuted $st $a1) -and -not (Get-AccountMuted (New-Defaults) $a1))
+    Write-SettingsFile $st $g | Out-Null
+    $l = (Read-SettingsFile $g).State
+    Check "each account's Mute is saved" ($l.soundOff["alt2"] -eq $true -and $l.soundOff["alt3"] -eq $false)
+    Set-AccountNick $st $a2 "Farmer"; Remove-AccountRecord $st $a3
+    Check "it follows a rename, and goes with a removed account" ($st.soundOff["farmer"] -eq $true -and -not $st.soundOff.ContainsKey("alt2") -and -not $st.soundOff.ContainsKey("alt3"))
+    $w = { param($nick, $num, $min) [pscustomobject]@{ Nick = $nick; Num = $num; ProcStart = (Get-Date "2026-10-17 10:00").AddMinutes($min) } }
+    $wins = @((& $w "Alt3" 1 0), (& $w "" 2 1), (& $w "Main" 3 5), (& $w "Alt1" 4 2), (& $w "Main" 5 1))
+    $st.accounts = @($a1, $mn, $a3)
+    $o = @(Get-ScreenOrder $wins $st.accounts)
+    Check "screens: main first, then the account list's order, unlinked windows last" ((($o | ForEach-Object { "$($_.Nick)/$($_.Num)" }) -join " ") -eq "Main/5 Main/3 Alt1/4 Alt3/1 /2") (($o | ForEach-Object { "$($_.Nick)/$($_.Num)" }) -join " ")
+
     # ---- the nickname the "Add account" box suggests ----
     $st = New-Defaults
     Check "the first account is suggested as Main" ((Get-DefaultNick $st) -eq "Main")

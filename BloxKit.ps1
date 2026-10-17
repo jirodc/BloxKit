@@ -104,6 +104,7 @@ function New-Defaults {
         afkOn         = $false      # the anti-AFK switch, as it was when the app closed
         animations    = $true       # startup intro, page changes, mascot reactions (also off when Windows' animations are off)
         afkOff        = @()         # lower-case nicks whose screen has its AFK tick off
+        soundOff      = @{}         # lower-case nick -> muted or not, each account's own Mute (the main always opens with sound)
         afkSkipActive = $true
         afkJitter     = $true
         afkActions    = @("jump")   # any of: jump, walk, zoom, click (one is picked at random each time)
@@ -211,6 +212,9 @@ function ConvertTo-State($s) {
     $spots = @{}
     if ($s.clickSpots) { foreach ($q in $s.clickSpots.PSObject.Properties) { $spots[$q.Name] = "" + $q.Value } }
     $state.clickSpots = $spots
+    $snd = @{}
+    if ($s.soundOff) { foreach ($q in $s.soundOff.PSObject.Properties) { $snd[$q.Name.ToLower()] = [bool]$q.Value } }
+    $state.soundOff = $snd
     $p = New-PlanDefaults
     if ($s.plan) {
         $steps = @()
@@ -275,6 +279,7 @@ function Set-AccountNick($state, $acc, [string]$nick) {
     }
     Move-NickKey $state.clickSpots $old $nick
     Move-NickKey $state.statsSecs $old $nick
+    Move-NickKey $state.soundOff $old $nick
     $state.afkOff = @(foreach ($n in @($state.afkOff)) { if ($n -eq $old.ToLower()) { $nick.ToLower() } else { $n } })
     $acc.nick = $nick
 }
@@ -284,6 +289,28 @@ function Get-DefaultNick($state) {
     if (@($state.accounts).Count -eq 0) { return "Main" }
     $n = 1; while (@($state.accounts | Where-Object { $_.nick -ieq "Alt$n" }).Count) { $n++ }
     return "Alt$n"
+}
+
+function Get-AccountMuted($state, $acc) {
+    # Should this account's new Roblox window start muted? The main always starts with sound
+    # (it's the one you play). Others keep their own Mute button, or follow "Mute alts".
+    if ($acc.isMain) { return $false }
+    $k = $acc.nick.ToLower()
+    if ($state.soundOff.ContainsKey($k)) { return [bool]$state.soundOff[$k] }
+    return [bool]$state.autoMuteAlts
+}
+
+function Get-ScreenOrder($wins, $accounts) {
+    # Screens follow the accounts: the main first, then the others in the account list's order,
+    # then windows not linked to an account (in their old order). Two windows of one account:
+    # the older first. Returns the windows in that order.
+    $rank = @{}; $i = 0
+    foreach ($a in @(@($accounts | Where-Object { $_.isMain }) + @($accounts | Where-Object { -not $_.isMain }))) { $rank[$a.nick.ToLower()] = $i++ }
+    $keyed = @(foreach ($w in @($wins)) {
+        $k = $(if ($w.Nick -and $rank.ContainsKey($w.Nick.ToLower())) { $rank[$w.Nick.ToLower()] } else { 100000 + [int]$w.Num })
+        [pscustomobject]@{ K = $k; T = $(if ($w.ProcStart) { $w.ProcStart.Ticks } else { [long]0 }); W = $w }
+    })
+    return @($keyed | Sort-Object K, T | ForEach-Object { $_.W })
 }
 
 function Get-AutoJoinSummary($state) {
@@ -368,6 +395,7 @@ function Remove-AccountRecord($state, $acc) {
     $state.accounts = @($state.accounts | Where-Object { -not [object]::ReferenceEquals($_, $acc) })
     foreach ($g in @($state.groups)) { $g.nicks = @($g.nicks | Where-Object { $_ -ine $acc.nick }) }
     $state.clickSpots.Remove($acc.nick.ToLower())
+    $state.soundOff.Remove($acc.nick.ToLower())
     $state.afkOff = @($state.afkOff | Where-Object { $_ -ne $acc.nick.ToLower() })
 }
 
@@ -4872,7 +4900,10 @@ function Assign-Window([IntPtr]$h, $acc) {
     if (-not $w) { return }
     $w.Nick = $acc.nick; $w.Name = $acc.nick; $w.Since = [DateTime]::Now; $w.Afk = Get-ScreenAfk $acc.nick
     $sp = Get-SpotFor $acc.nick; $w.ClickX = $sp[0]; $w.ClickY = $sp[1]
-    if ($script:State.autoMuteAlts -and -not $acc.isMain) { Set-Mute $w $true -Quiet }
+    Set-Mute $w (Get-AccountMuted $script:State $acc) -Quiet -Auto   # sound by account: the main always has it
+    # One account can only be in one server: an older window of it is finished (Roblox
+    # disconnects it), so close it instead of leaving it on a 'Disconnected' box.
+    foreach ($o in @($script:Wins | Where-Object { $_.Nick -ieq $acc.nick -and $_.Handle -ne $h })) { Close-ReplacedWindow $o "$($acc.nick) opened in a new window" }
     if ($script:State.lowPower) { Apply-LowPower }
     Apply-Efficiency
     $script:SessionDirty = $true
@@ -4890,6 +4921,10 @@ function New-SmallButton([string]$text, [string]$tip, [string]$bg) {
 }
 
 function Build-Wall {
+    # Main first, then the other accounts in list order; screen numbers (Ctrl+Alt+1..9) follow.
+    $order = @(Get-ScreenOrder $script:Wins $script:State.accounts)
+    for ($i = 0; $i -lt $order.Count; $i++) { if ($order[$i].Num -ne $i + 1) { $order[$i].Num = $i + 1; $script:SessionDirty = $true } }
+    $script:Wins.Clear(); foreach ($x in $order) { $script:Wins.Add($x) | Out-Null }
     foreach ($w in $script:Wins) { [RbxCore]::RemoveScreen($w.Thumb); $w.Thumb = [IntPtr]::Zero }
     $ui.Wall.Children.Clear()
     $n = $script:Wins.Count
@@ -5081,8 +5116,13 @@ function Back-To-App {
     Say "Back to Live screens."
 }
 
-function Set-Mute($w, [bool]$on, [switch]$Quiet) {
+function Set-Mute($w, [bool]$on, [switch]$Quiet, [switch]$Auto) {
+    # -Auto: set by the app (a new window), not your choice, so it isn't remembered for the account.
     $w.Muted = $on
+    if ($w.Nick -and -not $Auto) {
+        $k = $w.Nick.ToLower()
+        if (-not $script:State.soundOff.ContainsKey($k) -or [bool]$script:State.soundOff[$k] -ne $on) { $script:State.soundOff[$k] = $on; Save-Settings }   # kept for its next window
+    }
     $n = [RbxCore]::SetProcessMute([RbxCore]::PidOf($w.Handle), $on)
     if ($w.MuteBtn) {
         $w.MuteBtn.Content = $(if ($on) { "Unmute" } else { "Mute" })
@@ -5105,6 +5145,16 @@ function Set-ScreenAfk($w, [bool]$on) {
     $script:State.afkOff = @(@($script:State.afkOff | Where-Object { $_ -ne $k }) + @(if (-not $on) { $k }))
 }
 function Get-ScreenAfk([string]$nick) { -not ($nick -and @($script:State.afkOff) -contains $nick.ToLower()) }
+
+function Close-ReplacedWindow($w, [string]$why) {
+    # Closes an account's old window quietly: no alert, no automatic rejoin (that would
+    # knock the new one out of its server).
+    if (-not [RbxCore]::IsWindow($w.Handle)) { return }
+    [void]$script:ExpectedClose.Add($w.Handle.ToInt64())
+    $w.DiscFlag = $false
+    [RbxCore]::CloseWindow($w.Handle)
+    Say "Closed the old window $(Label-Of $w): $why."
+}
 
 function Close-RobloxWindow($w, [switch]$NoAsk) {
     if (-not $NoAsk) {
@@ -5446,6 +5496,11 @@ function Watch-Logs {
         foreach ($line in (Read-LogLines $w)) {
             $e = Read-LogEvent $line
             if (-not $e) { continue }
+            if ($e.Kind -eq "disc" -and $e.Code -eq "273") {
+                # This account joined a server from another window (or device): this one is done.
+                Close-ReplacedWindow $w "$(if ($w.Nick) { $w.Nick } else { 'that account' }) joined another server"
+                $changed = $true; break
+            }
             if (Update-Session $w.Sess $e $now) { $changed = $true }
             if ($e.Kind -eq "handoff" -and $w.ProcStart -and $e.At -ne [DateTime]::MinValue) {
                 # Multi-window off: this window took over a launch we're waiting on. Roblox
@@ -6133,7 +6188,8 @@ $Tick.Add_Tick({
     if ($script:TickCount % 3 -eq 1) { Watch-Logs }
     if ($script:TickCount % 20 -eq 0) { Check-Schedule; Update-LiveTexts }
     if ($script:TickCount % 5 -eq 0) {
-        foreach ($w in $script:Wins) { if ($w.Muted) { [RbxCore]::SetProcessMute([RbxCore]::PidOf($w.Handle), $true) | Out-Null } }
+        # Both ways: Windows can hand a new Roblox client the mute of an old one (they're the same program).
+        foreach ($w in $script:Wins) { [RbxCore]::SetProcessMute([RbxCore]::PidOf($w.Handle), [bool]$w.Muted) | Out-Null }
         if ($script:SessionDirty) { Save-Session }
     }
     if ($script:TickCount % 10 -eq 5) { Apply-Efficiency -Force }
