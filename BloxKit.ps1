@@ -1635,6 +1635,560 @@ function Get-AfkFocusText([string]$why) {
     }
 }
 
+# ------------------------------------------------------------ diagnostics --
+# BloxKit's own log, for finding out afterwards what went wrong. It stays on this PC.
+# Only the events and fields listed in $BkLogSchema are ever written, each checked against its
+# type; free text goes through Protect-BkText, which takes secrets out BEFORE anything is queued.
+# Write-BkLog only queues (no disk work, so it's safe in the middle of anti-AFK); Flush-BkLog
+# writes the queue in one go. Every disk call goes through a port (New-BkLogFilePort is the
+# real one), so tools\check-diag.ps1 can test it all with a pretend disk.
+# Field types: int, bool, time, version, name (a code name like System.IO.IOException or Do-Jumps:
+# it needs a . or - , which a Roblox username can't have, and it's never one of your names),
+# alias (acc-xxxxxx, from Get-BkLogAlias), enum:a|b|c, text (free text, cleaned).
+$BkLogWhere = "enum:user|bloxkit|bloxkit-other|taskbar|roblox|none"   # which kind of window, never which one
+$BkLogSchema = @{
+    "app.start"         = @{ Level = "info";  Fields = [ordered]@{ version = "version"; scriptWritten = "time"; host = "enum:exe|powershell"; psVersion = "version"; osBuild = "version"; testMode = "bool"; settingsSource = "enum:main|backup|new|locked"; accounts = "int"; screensRestored = "int" } }
+    "app.stop"          = @{ Level = "info";  Fields = [ordered]@{ reason = "enum:exit|update|import"; uptimeSec = "int"; dropped = "int" } }
+    "app.error"         = @{ Level = "error"; Fields = [ordered]@{ fatal = "bool"; area = "enum:general|settings|backup|json"; line = "int"; function = "name"; type = "name"; hresult = "int"; repeats = "int"; message = "text" } }
+    "afk.round"         = @{ Level = "info";  Fields = [ordered]@{ trigger = "enum:timer|button|tray|hotkey|test|repeat"; mode = "enum:hidden|quick"; screens = "int"; sent = "int"; skipNoFocus = "int"; skipFocusLost = "int"; skipCovered = "int"; skipNoWindow = "int"; skipFailed = "int"; back = $BkLogWhere; restored = "bool"; why = "enum:none|notarget|closed|refused"; durationMs = "int" } }
+    "afk.notstarted"    = @{ Level = "info";  Fields = [ordered]@{ why = "enum:notarget|stuck"; fg = $BkLogWhere } }
+    "afk.stuck"         = @{ Level = "warn";  Fields = [ordered]@{ why = "enum:notarget|closed|refused" } }
+    "afk.unstuck"       = @{ Level = "info";  Fields = [ordered]@{ fg = $BkLogWhere } }
+    "afk.state"         = @{ Level = "info";  Fields = [ordered]@{ on = "bool"; mode = "enum:hidden|quick"; minutes = "int"; jump = "bool"; step = "bool"; zoom = "bool"; click = "bool"; skipActive = "bool"; jitter = "bool" } }
+    "screen.add"        = @{ Level = "info";  Fields = [ordered]@{ screen = "int"; hwnd = "int"; pid = "int"; account = "alias"; main = "bool"; claimed = "bool" } }
+    "screen.remove"     = @{ Level = "info";  Fields = [ordered]@{ screen = "int"; hwnd = "int"; pid = "int"; account = "alias"; kind = "enum:closed|expected|replaced"; uptimeSec = "int" } }
+    "launch.start"      = @{ Level = "info";  Fields = [ordered]@{ account = "alias"; main = "bool"; link = "enum:game|private|profile|share|other"; helper = "bool" } }
+    "launch.window"     = @{ Level = "info";  Fields = [ordered]@{ account = "alias"; waitSec = "int" } }
+    "launch.timeout"    = @{ Level = "warn";  Fields = [ordered]@{ account = "alias"; main = "bool"; waitSec = "int" } }
+    "launch.cancel"     = @{ Level = "info";  Fields = [ordered]@{ pending = "int" } }
+    "launch.late"       = @{ Level = "info";  Fields = [ordered]@{ account = "alias"; waitSec = "int" } }
+    "roblox.disconnect" = @{ Level = "warn";  Fields = [ordered]@{ account = "alias"; code = "int"; reason = "enum:kicked|unexpected|elsewhere|lost|idle|connect|shutdown|closed|other"; autoRejoin = "bool" } }
+    "roblox.trayclosed" = @{ Level = "info";  Fields = [ordered]@{ count = "int" } }
+    "tab.report"        = @{ Level = "info";  Fields = [ordered]@{ outcome = "enum:closed|kept|notasked"; reason = "enum:window|connected|off|cancelled|nowindow|closed|timeout|nolog|left|nohelper|oldhelper|noport|unknown|other" } }
+    "update.check"      = @{ Level = "info";  Fields = [ordered]@{ result = "enum:latest|available|failed"; current = "version"; newest = "version"; errorType = "name" } }
+    "update.start"      = @{ Level = "info";  Fields = [ordered]@{ from = "version"; to = "version" } }
+    "multiwindow"       = @{ Level = "info";  Fields = [ordered]@{ state = "enum:on|off" } }
+    "log.dropped"       = @{ Level = "warn";  Fields = [ordered]@{ count = "int"; rejected = "int" } }
+}
+$BkLogRank = @{ info = 0; warn = 1; error = 2 }
+
+function New-BkLog([string]$dir, $port, [int]$maxBytes = 1048576, [int]$maxFiles = 4, [int]$maxQueue = 500) {
+    # A log for one run of BloxKit: a random session id and a random key for account aliases,
+    # both new every run, so nothing in it links one run to another.
+    $rng = New-Object Security.Cryptography.RNGCryptoServiceProvider
+    $b = New-Object byte[] 36; $rng.GetBytes($b); $rng.Dispose()
+    $log = @{
+        Dir = $dir; Path = [IO.Path]::Combine($dir, "bloxkit.log"); Port = $port
+        Session = (-join ($b[0..3] | ForEach-Object { $_.ToString("x2") })); Key = [byte[]]$b[4..35]; Seq = 0
+        Queue = New-Object System.Collections.Generic.List[object]; MaxQueue = $maxQueue; MaxBytes = $maxBytes; MaxFiles = $maxFiles
+        Known = @(); Rejected = 0; Dropped = 0; RejectsToReport = 0; DropsToReport = 0; Failures = 0; RetryAt = [DateTime]::MinValue; Off = $false; Notice = ""
+        EndChecked = $false; NeedNewline = $false
+    }
+    Set-BkLogSecrets $log @()
+    return $log
+}
+
+function Set-BkLogSecrets($log, $values) {
+    # Things that must never appear in the log, word for word (any case): account nicknames,
+    # Chrome profile folders, links, the Discord webhook... plus this PC's user and computer name.
+    $all = @(@($values) + @($env:USERNAME, $env:COMPUTERNAME, $env:USERPROFILE)) | Where-Object { $_ } | ForEach-Object { ("" + $_).Trim() } | Where-Object { $_.Length -ge 3 }
+    $log.Known = @($all | Sort-Object -Unique | Sort-Object Length -Descending)
+}
+
+function Test-BkLogKnown($log, [string]$s) {
+    foreach ($k in $log.Known) { if ($s.IndexOf($k, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true } }
+    return $false
+}
+
+function Get-BkLogJsonText([string]$s) {
+    # A JSON string in plain ASCII: anything else (and every control character) is escaped.
+    $sb = New-Object System.Text.StringBuilder ($s.Length + 8)
+    [void]$sb.Append([char]34)
+    foreach ($ch in $s.ToCharArray()) {
+        $c = [int]$ch
+        if ($c -eq 34) { [void]$sb.Append('\"') }
+        elseif ($c -eq 92) { [void]$sb.Append('\\') }
+        elseif ($c -lt 32 -or $c -gt 126) { [void]$sb.Append(('\u{0:x4}' -f $c)) }
+        else { [void]$sb.Append($ch) }
+    }
+    [void]$sb.Append([char]34)
+    return $sb.ToString()
+}
+
+# What Protect-BkText replaces, in this order (case doesn't matter). Pattern matching can't know
+# every secret, so after these, anything that still looks risky makes the whole text left out.
+$BkLogPatterns = @(
+    @('(https?:)?(//)?([a-z0-9-]+\.)*discord(app)?\.com/api/webhooks/\S*', '[webhook]'),
+    @('_\|WARNING:-DO-NOT-SHARE-THIS\S*', '[cookie]'),
+    @('\.ROBLOSECURITY\s*[=:]?\s*[^\s;,]*', '[cookie]'),
+    @('roblox-player:\S*', '[login-ticket]'),
+    @('gameinfo:\S*', '[login-ticket]'),
+    @('(proxy-)?authorization\s*[:=]\s*((bearer|basic|digest|negotiate|ntlm|token)\s+)?\S+', '[auth]'),
+    @('\bbearer\s+\S+', '[auth]'),
+    @('\b(password|passwd|pwd|pass|passphrase|token|access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|apikey|key|secret|client[_-]?secret|code|privateserverlinkcode|linkcode|access[_-]?code|ticket|auth[a-z_-]*|cookie|set-cookie|session[a-z_-]*|sid|sig|signature|credentials?)\s*[:=]\s*("[^"]*"|''[^'']*''|[^\s&;,]+)', '$1=[secret]'),
+    @('[^\s@''"<>()]+@[^\s@''"<>()]+\.[a-z]{2,}', '[email]'),
+    @('''[^'']*(?:[a-z]:[\\/]|\\|/)[^'']*''', '''[path]'''),   # a path in quotes (a drive, \ or /)...
+    @('"[^"]*(?:[a-z]:[\\/]|\\)[^"]*"', '"[path]"'),             # ...not just any quoted text with a colon in it
+    @('\\\\[^\s"''<>|]+', '[path]'),
+    @('\b[a-z]:[\\/][^\s"''<>|]*', '[path]'),
+    @('[^\s"''<>|]*\\[^\s"''<>|]*', '[path]'),
+    @('\b(?:\d{1,3}\.){3}\d{1,3}\b', '[ip]'),
+    @('\b(?:[0-9a-f]{1,4}:){3,7}[0-9a-f]{1,4}\b', '[ip]'),
+    @('\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b', '[id]'),
+    @('[a-z0-9+/_=-]{24,}', '[blob]'),
+    @('\b[0-9a-f]{16,}\b', '[blob]'),
+    @('\d{7,}', '[number]')
+)
+# Left over after the patterns, any of these means the text can't be trusted: it's left out whole.
+# (A key=value pair, a link, a path, an address, braces or tags, a command-line flag, JSON, or
+# something still encoded, or a JSON reader's "(position): text" echo of a file.)
+$BkLogUnsafe = '://|\bwww\.|[a-z]:[\\/]|\\|=|@|[{}<>]|(^|\s)--?[a-z][a-z0-9_-]*|json|deserializ|serializ|primitive|%[0-9a-f]{2}|\$env:|%[a-z_]+%|\(\d+\):'
+# Characters that take no space and can split a word to hide it (built here so this file stays plain ASCII).
+$BkLogZeroWidth = "[" + [char]0x200B + "-" + [char]0x200D + [char]0x2060 + [char]0xFEFF + [char]0x00AD + "]"
+
+function Protect-BkText($log, $s) {
+    # Free text made safe to write, or $null when it can't be made safe (then it's left out).
+    try {
+        if ($s -isnot [string] -or $s -eq "") { return $null }
+        $t = $s
+        if ($t.Length -gt 4096) { $t = $t.Substring(0, 4096) -replace '\S+$', '' }   # never keep half a word
+        # 1. Undo what hides a secret: JSON escapes, URL-encoding (twice-encoded too), zero-width
+        #    characters inside words, odd spacing or control characters between them, HTML entities,
+        #    and full-width or other compatibility forms of letters.
+        $t = $t -replace '\\/', '/'
+        $t = [regex]::Replace($t, '\\u([0-9a-fA-F]{4})', { param($m) [string][char][Convert]::ToInt32($m.Groups[1].Value, 16) })
+        for ($i = 0; $i -lt 3; $i++) { $u = [System.Net.WebUtility]::HtmlDecode([Uri]::UnescapeDataString($t)); if ($u -eq $t) { break }; $t = $u }   # %xx and &#x2F; too
+        $t = $t.Normalize([Text.NormalizationForm]::FormKC)   # full-width and other compatibility forms become plain letters
+        $t = $t -replace $BkLogZeroWidth, ''
+        $t = ($t -replace '[\p{C}\p{Z}\s]+', ' ').Trim()
+        # 2. Your own words (nicknames, profile folders, links, the webhook, user and PC name).
+        foreach ($k in $log.Known) { $t = [regex]::Replace($t, [regex]::Escape($k), '[private]', 'IgnoreCase') }
+        # 3. Known kinds of secrets; a link keeps only its host.
+        foreach ($p in $BkLogPatterns) { $t = [regex]::Replace($t, $p[0], $p[1], 'IgnoreCase') }
+        $t = [regex]::Replace($t, '\b[a-z][a-z0-9+.-]{1,20}://([^/?#\s@]*@)?([^/?#\s:]*)[^\s"''<>]*', { param($m) "[url:" + $m.Groups[2].Value + "]" }, 'IgnoreCase')
+        $t = [regex]::Replace($t, '\b((?:[a-z0-9-]+\.)+[a-z]{2,})[/?#][^\s"''<>]*', { param($m) "[url:" + $m.Groups[1].Value + "]" }, 'IgnoreCase')
+        # 4. Deny by default: anything still risky, and the whole text stays out.
+        if ($t -match $BkLogUnsafe) { return $null }
+        $t = ($t -replace '\s+', ' ').Trim()
+        if ($t.Length -gt 300) { $t = $t.Substring(0, 300) }
+        if ($t -eq "") { return $null }
+        return $t
+    } catch { return $null }
+}
+
+function Get-BkLogAlias($log, [string]$id) {
+    # An account's name in the log, for this run only: acc- and 6 hex digits of a keyed hash of its
+    # internal id. The key is new every run, so the same account can't be followed from run to run.
+    $h = New-Object System.Security.Cryptography.HMACSHA256 (, [byte[]]$log.Key)
+    try { $b = $h.ComputeHash([Text.Encoding]::UTF8.GetBytes("" + $id)) } finally { $h.Dispose() }
+    return "acc-" + (-join ($b[0..2] | ForEach-Object { $_.ToString("x2") }))
+}
+
+function ConvertTo-BkLogField($log, [string]$type, $v) {
+    # One field's value as JSON, or $null when it isn't exactly what the schema allows.
+    if ($null -eq $v) { return $null }
+    $inv = [Globalization.CultureInfo]::InvariantCulture
+    if ($type -eq "int") {
+        if ($v -is [int] -or $v -is [long] -or $v -is [int16] -or $v -is [byte] -or $v -is [sbyte] -or $v -is [uint16] -or $v -is [uint32]) { return ([long]$v).ToString($inv) }
+        if ($v -is [double] -or $v -is [single] -or $v -is [decimal]) {
+            $d = [double]$v
+            if (-not [double]::IsNaN($d) -and -not [double]::IsInfinity($d) -and [Math]::Floor($d) -eq $d -and [Math]::Abs($d) -lt 1e15) { return ([long]$d).ToString($inv) }
+        }
+        return $null
+    }
+    if ($type -eq "bool") { if ($v -is [bool]) { return $(if ($v) { "true" } else { "false" }) }; return $null }
+    if ($type -eq "time") { if ($v -is [DateTime]) { return Get-BkLogJsonText ($v.ToString("yyyy-MM-ddTHH:mm:ss.fffzzz", $inv)) }; return $null }
+    if ($v -isnot [string]) { return $null }
+    if ($type.StartsWith("enum:")) { if (($type.Substring(5) -split '\|') -ccontains $v) { return Get-BkLogJsonText $v }; return $null }
+    if ($type -eq "version") { if ($v -cmatch '^[0-9]{1,6}(\.[0-9]{1,6}){0,3}\z') { return Get-BkLogJsonText $v }; return $null }
+    if ($type -eq "name") { if ($v -cmatch '^(?=.*[.-])[A-Za-z0-9_.+-]{1,64}\z' -and -not (Test-BkLogKnown $log $v)) { return Get-BkLogJsonText $v }; return $null }
+    if ($type -eq "alias") { if ($v -cmatch '^acc-[0-9a-f]{6}\z') { return Get-BkLogJsonText $v }; return $null }
+    if ($type -eq "text") { $t = Protect-BkText $log $v; if ($t) { return Get-BkLogJsonText $t }; return $null }
+    return $null
+}
+
+function Write-BkLog($log, [string]$ev, $fields) {
+    # Queues one event: only the fields its schema allows, each checked and cleaned.
+    # Never touches the disk and never throws; anything that doesn't fit is left out (and counted).
+    try {
+        if (-not $log) { return }
+        if ($log.Off) { $log.Dropped++; return }
+        $line = New-BkLogLine $log $ev $fields
+        if ($line) { Add-BkLogLine $log $BkLogSchema[$ev].Level $line }
+    } catch { if ($log) { $log.Rejected++; $log.RejectsToReport++ } }
+}
+
+function New-BkLogLine($log, [string]$ev, $fields) {
+    # One event as a JSON line, or $null for an event that isn't in the schema.
+    try {
+        $schema = $(if ($ev -and ($BkLogSchema.Keys -ccontains $ev)) { $BkLogSchema[$ev] } else { $null })   # exact name, exact case
+        if (-not $schema) { $log.Rejected++; $log.RejectsToReport++; return $null }
+        $log.Seq++
+        $now = & $log.Port.Now
+        $sb = New-Object System.Text.StringBuilder 256
+        [void]$sb.Append('{"t":').Append((Get-BkLogJsonText $now.ToString("yyyy-MM-ddTHH:mm:ss.fffzzz", [Globalization.CultureInfo]::InvariantCulture)))
+        [void]$sb.Append(',"s":"').Append($log.Session).Append('","n":').Append($log.Seq).Append(',"lvl":"').Append($schema.Level).Append('","ev":').Append((Get-BkLogJsonText $ev))
+        if ($fields -is [System.Collections.IDictionary]) {
+            foreach ($k in @($fields.Keys)) { if (-not $schema.Fields.Contains("" + $k)) { $log.Rejected++; $log.RejectsToReport++ } }
+            # An error's message is only written for area "general" and never for a JSON error:
+            # settings, backup and JSON messages can repeat what's in the file.
+            $noMessage = ($ev -eq "app.error") -and (("" + $fields["area"]) -cne "general" -or ("" + $fields["type"]) -match 'json|serializ')
+            foreach ($name in @($schema.Fields.Keys)) {
+                if (-not $fields.Contains($name) -or $null -eq $fields[$name]) { continue }
+                if ($noMessage -and $name -eq "message") { continue }
+                $j = ConvertTo-BkLogField $log $schema.Fields[$name] $fields[$name]
+                if ($null -eq $j) { $log.Rejected++; $log.RejectsToReport++; continue }
+                [void]$sb.Append(',"').Append($name).Append('":').Append($j)
+            }
+        } elseif ($null -ne $fields) { $log.Rejected++; $log.RejectsToReport++ }
+        [void]$sb.Append('}')
+        return $sb.ToString()
+    } catch { $log.Rejected++; $log.RejectsToReport++; return $null }
+}
+
+function Add-BkLogLine($log, [string]$level, [string]$line) {
+    # Queues a line. When the queue is full, routine events give way first: the oldest info line
+    # makes room, then the oldest warning, then the oldest error. A new info line is the one
+    # dropped when only warnings and errors are queued. Every drop is counted.
+    $rank = $BkLogRank[$level]; $q = $log.Queue
+    if ($q.Count -ge $log.MaxQueue) {
+        $log.Dropped++; $log.DropsToReport++
+        $victim = -1
+        for ($r = 0; $r -le $rank -and $victim -lt 0; $r++) { for ($i = 0; $i -lt $q.Count; $i++) { if ($q[$i].Rank -eq $r) { $victim = $i; break } } }
+        if ($victim -lt 0) { return }
+        $q.RemoveAt($victim)
+    }
+    $q.Add([pscustomobject]@{ Rank = $rank; Line = $line })
+}
+
+function Flush-BkLog($log, [switch]$Force) {
+    # Writes the queue (the only place the log touches the disk), with a log.dropped line first when
+    # events were dropped or rejected since the last flush. Never throws and never outputs anything.
+    # Files: bloxkit.log, and when it would pass MaxBytes, it becomes .1 (.1 becomes .2 ...); with
+    # MaxFiles 4 the oldest is .3, so all of them together stay under MaxFiles x MaxBytes.
+    # A failure (file in use, disk full, no permission) keeps what wasn't written and waits a
+    # minute; 3 in a row turn the log off for this run. Notice then says why, in words only:
+    # the raw error can hold a path or a secret, and the logger never logs about itself.
+    # -Force: the last write (closing, or a crash) doesn't wait out that minute.
+    if (-not $log -or $log.Off) { return }
+    $p = $log.Port
+    $now = [DateTime]::Now
+    try {
+        $now = & $p.Now
+        if (-not $Force -and $now -lt $log.RetryAt -and ($log.RetryAt - $now).TotalSeconds -le 60) { return }   # (a clock set back doesn't mean a longer wait)
+        $summary = $null
+        if ($log.DropsToReport -or $log.RejectsToReport) { $summary = New-BkLogLine $log "log.dropped" @{ count = [int]$log.DropsToReport; rejected = [int]$log.RejectsToReport } }
+        if (-not $summary -and $log.Queue.Count -eq 0) { return }
+        [void](& $p.EnsureDir $log.Dir)
+        $size = [long](& $p.Size $log.Path)
+        if (-not $log.EndChecked) {
+            if ($size -gt 0 -and -not (& $p.EndsWithNewline $log.Path)) { $log.NeedNewline = $true }   # cut off by a crash
+            $log.EndChecked = $true
+        }
+        # Lines are plain ASCII, so a line's length is its size in bytes (+1 for the newline).
+        $pending = New-Object System.Collections.Generic.List[string]
+        if ($summary) { $pending.Add($summary) }
+        foreach ($e in $log.Queue) { $pending.Add($e.Line) }
+        $chunk = New-Object System.Text.StringBuilder
+        $inChunk = 0; $summaryIn = $false
+        for ($i = 0; $i -le $pending.Count; $i++) {
+            $line = $(if ($i -lt $pending.Count) { $pending[$i] } else { $null })
+            $lead = $(if ($log.NeedNewline -and $chunk.Length -eq 0) { 1 } else { 0 })
+            if ($null -ne $line -and $line.Length + 1 + $lead -gt $log.MaxBytes) { $log.Dropped++; $log.DropsToReport++; if ($i -eq 0 -and $summary) { $summaryIn = $true } else { $inChunk++ }; continue }
+            $full = ($null -ne $line) -and ($size + $chunk.Length + $lead + $line.Length + 1 -gt $log.MaxBytes)
+            if (($null -eq $line -or $full) -and $chunk.Length -gt 0) {
+                [void](& $p.Append $log.Path $chunk.ToString())
+                $log.NeedNewline = $false; $size += $chunk.Length; [void]$chunk.Clear()
+                if ($summaryIn) { $log.DropsToReport = 0; $log.RejectsToReport = 0; $summaryIn = $false }
+                if ($inChunk -gt 0) { $log.Queue.RemoveRange(0, [Math]::Min($inChunk, $log.Queue.Count)); $inChunk = 0 }
+            }
+            if ($null -eq $line) { break }
+            if ($size + $lead + $line.Length + 1 -gt $log.MaxBytes -and $size -gt 0) { Move-BkLogFiles $log; $size = 0; $log.NeedNewline = $false; $lead = 0 }
+            if ($log.NeedNewline -and $chunk.Length -eq 0) { [void]$chunk.Append("`n") }
+            [void]$chunk.Append($line).Append("`n")
+            if ($i -eq 0 -and $summary) { $summaryIn = $true } else { $inChunk++ }
+        }
+        # Lines dropped for being too big, with nothing after them to write, leave the queue too
+        # (otherwise the next flush would drop and count them again).
+        if ($inChunk -gt 0) { $log.Queue.RemoveRange(0, [Math]::Min($inChunk, $log.Queue.Count)) }
+        if ($summaryIn) { $log.DropsToReport = 0; $log.RejectsToReport = 0 }
+        $log.Failures = 0
+    } catch {
+        # Whatever was half-written, the next write starts on a new line.
+        $log.NeedNewline = $true
+        $log.Failures++
+        $log.RetryAt = $now.AddSeconds(60)
+        if ($log.Failures -ge 3) {
+            $log.Dropped += $log.Queue.Count; $log.Queue.Clear()
+            $log.Off = $true
+            $log.Notice = "The diagnostics log is off for this run: " + (Get-BkLogFailure $_) + "."
+        }
+    }
+}
+
+function Move-BkLogFiles($log) {
+    # bloxkit.log becomes .1, .1 becomes .2 ... and the oldest (MaxFiles - 1) is deleted first.
+    $p = $log.Port; $last = [Math]::Max(1, $log.MaxFiles - 1)
+    $oldest = "$($log.Path).$last"
+    if (& $p.Exists $oldest) { [void](& $p.Delete $oldest) }
+    for ($i = $last - 1; $i -ge 1; $i--) { $f = "$($log.Path).$i"; if (& $p.Exists $f) { [void](& $p.Move $f "$($log.Path).$($i + 1)") } }
+    [void](& $p.Move $log.Path "$($log.Path).1")
+}
+
+function Get-BkLogFailure($err) {
+    # Why writing failed, in words. Only the error's kind and code are looked at, never its text.
+    $e = $(if ($err -is [System.Management.Automation.ErrorRecord]) { $err.Exception } else { $err })
+    while ($e) {
+        $h = $e.HResult
+        if ($h -eq -2147024784 -or $h -eq -2147024857) { return "the disk is full" }
+        if ($h -eq -2147024864 -or $h -eq -2147024863) { return "the log file is in use by another program" }
+        if ($e -is [System.UnauthorizedAccessException] -or $h -eq -2147024891) { return "no permission to write in the logs folder" }
+        if ($e -is [System.IO.DirectoryNotFoundException] -or $e -is [System.IO.PathTooLongException] -or $e -is [System.IO.DriveNotFoundException]) { return "the logs folder isn't available" }
+        $e = $e.InnerException
+    }
+    return "it couldn't be written"
+}
+
+function New-BkLogFilePort {
+    # The real disk, for New-BkLog. UTF-8 without a byte-order mark; appends let others read along.
+    @{
+        EnsureDir       = { param($d) [void][IO.Directory]::CreateDirectory($d) }
+        Size            = { param($f) $(if ([IO.File]::Exists($f)) { (New-Object IO.FileInfo $f).Length } else { [long]0 }) }
+        EndsWithNewline = {
+            param($f)
+            if (-not [IO.File]::Exists($f)) { return $true }
+            $s = New-Object IO.FileStream ($f, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+            try { if ($s.Length -eq 0) { return $true }; [void]$s.Seek(-1, [IO.SeekOrigin]::End); return ($s.ReadByte() -eq 10) } finally { $s.Dispose() }
+        }
+        Append          = { param($f, $t) [IO.File]::AppendAllText($f, $t, (New-Object Text.UTF8Encoding $false)) }
+        Move            = { param($a, $b) [IO.File]::Move($a, $b) }
+        Delete          = { param($f) if ([IO.File]::Exists($f)) { [IO.File]::Delete($f) } }
+        Exists          = { param($f) [IO.File]::Exists($f) }
+        Now             = { [DateTime]::Now }
+    }
+}
+
+function Get-BkOsBuild {
+    # Windows' real version, for app.start. Inside BloxKit.exe, .NET's OSVersion says 6.2 (Windows'
+    # compatibility shim), so it's read from the registry; GetValue gives $null rather than an error.
+    $k = "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+    $maj = [Microsoft.Win32.Registry]::GetValue($k, "CurrentMajorVersionNumber", $null)
+    $min = [Microsoft.Win32.Registry]::GetValue($k, "CurrentMinorVersionNumber", $null)
+    $build = [Microsoft.Win32.Registry]::GetValue($k, "CurrentBuildNumber", $null)
+    $ubr = [Microsoft.Win32.Registry]::GetValue($k, "UBR", $null)
+    if ($null -ne $maj -and $null -ne $min -and $build) { return "$maj.$min.$build" + $(if ($null -ne $ubr) { ".$ubr" } else { "" }) }
+    return "" + [Environment]::OSVersion.Version
+}
+
+function Get-BkLogSecretValues($state, $chromeNames) {
+    # Everything in the settings that is yours and must never reach the log: account nicknames,
+    # Chrome profile folders, profile and last links, saved links and their names, group names,
+    # the link box, the scheduled link, the Discord webhook, and Chrome's profile names.
+    $v = New-Object System.Collections.Generic.List[string]
+    foreach ($a in @($state.accounts)) { if ($a) { foreach ($x in @($a.nick, $a.profileDir, $a.profileUrl, $a.lastUrl)) { if ($x) { $v.Add("" + $x) } } } }
+    foreach ($f in @($state.favorites)) { if ($f) { foreach ($x in @($f.name, $f.url)) { if ($x) { $v.Add("" + $x) } } } }
+    foreach ($g in @($state.groups)) { if ($g -and $g.name) { $v.Add("" + $g.name) } }
+    foreach ($x in @($state.lastLink, $state.schedLink, $state.webhook)) { if ($x) { $v.Add("" + $x) } }
+    foreach ($x in @($chromeNames)) { if ($x) { $v.Add("" + $x) } }
+    return $v.ToArray()
+}
+
+# ----- the error sweep: what PowerShell noted in $Error, logged once per kind -----
+# $Error is PowerShell's list of recent errors, newest first, at most $MaximumErrorCount (256).
+# Caught errors and -ErrorAction SilentlyContinue ones are noted there too. Once a second the
+# sweep takes what's new since last time, found by the object (the count stops changing once
+# the list is full), leaves out the errors BloxKit expects and the log's own, and logs each kind
+# (same line, type and error id) once; how often each came back is written when BloxKit closes.
+$BkErrorExpected = @(   # measured on Windows PowerShell 5.1, from BloxKit's own lookups
+    "NoProcessFoundForGivenName,Microsoft.PowerShell.Commands.GetProcessCommand",   # Get-Process -Name: no Roblox running
+    "NoProcessFoundForGivenId,Microsoft.PowerShell.Commands.GetProcessCommand",     # Get-Process -Id: that program just closed
+    "PathNotFound,Microsoft.PowerShell.Commands.GetChildItemCommand",               # a folder that isn't there (yet)
+    "PathNotFound,Microsoft.PowerShell.Commands.RemoveItemCommand"                  # deleting something already gone
+)
+$BkErrorAreas = @{   # the function an error happened in -> its area (their messages are never logged)
+    "Read-SettingsFile" = "settings"; "Write-SettingsFile" = "settings"; "ConvertTo-State" = "settings"; "Load-Settings" = "settings"
+    "Save-Settings" = "settings"; "ConvertTo-SavedRun" = "settings"; "ConvertFrom-SavedRun" = "settings"; "Save-PlanRun" = "settings"
+    "Send-Webhook" = "settings"; "Test-HookUrl" = "settings"
+    "New-BackupObject" = "backup"; "Read-BackupFile" = "backup"; "Export-Backup" = "backup"; "Import-Backup" = "backup"
+    "Read-JsonFile" = "json"; "Save-Session" = "json"; "Get-ChromeProfiles" = "json"; "Get-ProfileNames" = "json"
+}
+
+function New-BkErrorSweep([int]$cap = 256, [int]$maxKeys = 50) {
+    # Seen: the newest entry already looked at. Keys: each kind logged so far and how often it came.
+    @{ Seen = $null; Cap = $cap; MaxKeys = $maxKeys; Keys = @{}; Order = New-Object System.Collections.Generic.List[string]
+       Expected = 0; Own = 0; Odd = 0; Overflows = 0; KeyOverflow = 0 }
+}
+
+function Get-BkNewErrors($sweep, $errors) {
+    # The entries of $errors (newest first) that came after the last one seen, oldest first.
+    # Lost: the last one seen isn't there any more and the list is full, so some came and went.
+    $new = New-Object System.Collections.Generic.List[object]
+    $found = $false
+    for ($i = 0; $i -lt $errors.Count; $i++) {
+        $e = $errors[$i]
+        if ($null -ne $sweep.Seen -and [object]::ReferenceEquals($e, $sweep.Seen)) { $found = $true; break }
+        $new.Add($e)
+    }
+    $new.Reverse()
+    # A plain array: in Windows PowerShell 5.1, @() around a List of error records throws
+    # "Argument types do not match".
+    return @{ New = $new.ToArray(); Lost = (($null -ne $sweep.Seen) -and -not $found -and $errors.Count -ge $sweep.Cap) }
+}
+
+function Get-BkErrorFrames($e) {
+    # The function names on an error's script stack, innermost first.
+    if ($e -isnot [System.Management.Automation.ErrorRecord]) { return @() }
+    return @(("" + $e.ScriptStackTrace) -split "`r?`n" | ForEach-Object { if ($_ -match '^\s*at (.+?), ') { $Matches[1] } })
+}
+
+function Get-BkErrorArea($rec, $ex, $frames) {
+    # settings, backup or json when the error came from there (then its message is never logged),
+    # otherwise general. JSON when the failing command, the error id or the type says so.
+    $cmd = $(if ($rec -and $rec.InvocationInfo -and $rec.InvocationInfo.MyCommand) { "" + $rec.InvocationInfo.MyCommand.Name } else { "" })
+    $id = $(if ($rec) { "" + $rec.FullyQualifiedErrorId } else { "" })
+    if (("$cmd $id " + $ex.GetType().FullName) -match 'json|serializ') { return "json" }
+    foreach ($fn in @($frames)) { if ($BkErrorAreas.ContainsKey($fn)) { return $BkErrorAreas[$fn] } }
+    return "general"
+}
+
+function ConvertTo-BkErrorFields($e, [bool]$fatal) {
+    # The app.error fields for one error (an ErrorRecord, or a bare exception). Names come only from
+    # GetType().FullName and MyCommand.Name. A message only for area general, and only when it's
+    # known where the error happened; the log cleans it, or leaves it out.
+    $rec = $(if ($e -is [System.Management.Automation.ErrorRecord]) { $e } else { $null })
+    $ex = $(if ($rec) { $rec.Exception } else { $e })
+    $real = $ex
+    if ($ex -is [System.Management.Automation.MethodInvocationException] -and $ex.InnerException) { $real = $ex.InnerException }   # a .NET error inside PowerShell's wrapper
+    $frames = @(Get-BkErrorFrames $e)
+    $area = Get-BkErrorArea $rec $real $frames
+    $f = @{ fatal = $fatal; area = $area; type = $real.GetType().FullName; hresult = [int]$real.HResult }
+    if ($rec -and $rec.InvocationInfo) {
+        $f.line = [int]$rec.InvocationInfo.ScriptLineNumber
+        if ($rec.InvocationInfo.MyCommand -and $rec.InvocationInfo.MyCommand.Name) { $f.function = "" + $rec.InvocationInfo.MyCommand.Name }
+    }
+    if ($area -eq "general" -and $frames.Count -gt 0) { $f.message = "" + $ex.Message }
+    return $f
+}
+
+function Invoke-BkErrorSweep($sweep, $log, $errors) {
+    # One sweep. Only queues (no disk work) and never throws.
+    try {
+        if ($errors.Count -eq 0 -or [object]::ReferenceEquals($errors[0], $sweep.Seen)) { return }   # nothing new: the usual case
+        $r = Get-BkNewErrors $sweep $errors
+        if ($r.Lost) { $sweep.Overflows++ }   # reported once, at closing (not a line every second)
+        foreach ($e in $r.New) { try { Add-BkErrorEntry $sweep $log $e } catch { } }
+    } catch { }
+    finally {
+        # Errors made while sweeping (by the sweep or the log) count as seen: they're never swept.
+        $sweep.Seen = $(if ($errors.Count -gt 0) { $errors[0] } else { $null })
+    }
+}
+
+function Add-BkErrorEntry($sweep, $log, $e) {
+    if ($e -isnot [System.Management.Automation.ErrorRecord] -and $e -isnot [System.Exception]) { $sweep.Odd++; return }
+    if (@(Get-BkErrorFrames $e | Where-Object { $_ -match 'BkLog|BkError|BkText' }).Count) { $sweep.Own++; return }   # the log's own
+    $id = $(if ($e -is [System.Management.Automation.ErrorRecord]) { "" + $e.FullyQualifiedErrorId } else { "" })
+    if ($BkErrorExpected -contains $id) { $sweep.Expected++; return }
+    $f = ConvertTo-BkErrorFields $e $false
+    $key = "$($f.line)|$($f.type)|$id"
+    if ($sweep.Keys.ContainsKey($key)) { $sweep.Keys[$key].Count++; return }
+    if ($sweep.Keys.Count -ge $sweep.MaxKeys) { $sweep.KeyOverflow++; return }
+    $keep = @{}; foreach ($k in $f.Keys) { if ($k -ne "message") { $keep[$k] = $f[$k] } }
+    $sweep.Keys[$key] = @{ Count = 1; Fields = $keep }
+    $sweep.Order.Add($key)
+    Write-BkLog $log "app.error" $f
+}
+
+function Write-BkErrorSummary($sweep, $log) {
+    # At closing: one line per kind of error that came back, with how many more times (no message),
+    # and what couldn't be logged (kinds beyond MaxKeys, errors that came and went) as dropped.
+    foreach ($key in $sweep.Order) {
+        $k = $sweep.Keys[$key]
+        if ($k.Count -gt 1) { $f = $k.Fields.Clone(); $f.repeats = [int]($k.Count - 1); Write-BkLog $log "app.error" $f; $k.Count = 1 }
+    }
+    $extra = $sweep.KeyOverflow + $sweep.Overflows
+    if ($extra -gt 0) { $log.Dropped += $extra; $log.DropsToReport += $extra; $sweep.KeyOverflow = 0; $sweep.Overflows = 0 }
+}
+
+# ----- anti-AFK diagnostics -----
+# What anti-AFK did, for the log: only what went wrong (a screen skipped, the keyboard not given
+# back) and the moments the keyboard gets stuck or free again. A clean round writes nothing, and a
+# round refused for the same reason as last time isn't written again. These only read a finished
+# round (they never change it, or anti-AFK's state); Write-AfkDiagEvents only queues (no disk).
+function Get-AfkWindowKind($port, [IntPtr]$h, $ctx) {
+    # Which kind of window, never which one: user | bloxkit | bloxkit-other | taskbar | roblox | none
+    try {
+        if ($h -eq [IntPtr]::Zero -or -not $port.IsWindow.Invoke($h)) { return "none" }
+        if (Test-AfkRobloxWindow $port $h $ctx) { return "roblox" }
+        if ($AfkShellClasses -contains ("" + $port.ClassOf.Invoke($h))) { return "taskbar" }
+        if ($port.PidOf.Invoke($h) -eq $ctx.OwnPid) { return $(if ($h -eq $ctx.Main) { "bloxkit" } else { "bloxkit-other" }) }
+        return "user"
+    } catch { return "none" }
+}
+
+function New-AfkDiag { @{ LastNotStarted = ""; LastState = $null } }   # the last refusal reason and the last afk.state logged
+
+function Get-AfkRoundEvents($diag, $pass, $trigger, $mode, $durationMs, $backKind, $wasStuck, $isStuck) {
+    # A finished round -> its events: afk.round only when a screen was skipped (other than "its window
+    # closed") or the keyboard wasn't given back; afk.stuck when this round made it stuck.
+    $out = @()
+    try {
+        if ($diag) { $diag.LastNotStarted = "" }   # a round started: a later refusal is news again
+        if (-not $pass) { return $out }
+        $res = @($pass.Results | Where-Object { $_ -is [System.Collections.IDictionary] })
+        $n = @{ Sent = 0; NoFocus = 0; FocusLost = 0; Covered = 0; NoWindow = 0; Failed = 0 }
+        foreach ($r in $res) { $s = "" + $r.Sent; if ($n.ContainsKey($s)) { $n[$s]++ } else { $n.Failed++ } }
+        $restored = [bool]$pass.Restored
+        if (($res.Count - $n.Sent - $n.NoWindow) -gt 0 -or -not $restored) {
+            $out += @{ Ev = "afk.round"; Fields = @{
+                trigger = "" + $trigger; mode = "" + $mode; screens = $res.Count; sent = $n.Sent
+                skipNoFocus = $n.NoFocus; skipFocusLost = $n.FocusLost; skipCovered = $n.Covered; skipNoWindow = $n.NoWindow; skipFailed = $n.Failed
+                back = "" + $backKind; restored = $restored; why = $(if ($restored) { "none" } else { "" + $pass.Why }); durationMs = [int]$durationMs } }
+        }
+        if (-not [bool]$wasStuck -and [bool]$isStuck -and -not $restored) { $out += @{ Ev = "afk.stuck"; Fields = @{ why = "" + $pass.Why } } }
+    } catch { }
+    return $out
+}
+
+function Get-AfkNotStartedEvent($diag, $why, $fgKind) {
+    # A refused round -> afk.notstarted, unless the last refusal had the same reason.
+    try {
+        if ($diag) { if ($diag.LastNotStarted -eq "" + $why) { return $null }; $diag.LastNotStarted = "" + $why }
+        return @{ Ev = "afk.notstarted"; Fields = @{ why = "" + $why; fg = "" + $fgKind } }
+    } catch { return $null }
+}
+
+function New-AfkUnstuckEvent($fgKind) { @{ Ev = "afk.unstuck"; Fields = @{ fg = "" + $fgKind } } }
+
+function Get-AfkStateFields($on, $state) {
+    # Anti-AFK's settings as anti-AFK really uses them: on = the running switch (not the saved copy),
+    # hidden only when the mode is exactly "hidden" (anything else runs as quick, like Do-Jumps),
+    # and no actions picked means jump (like Pick-AfkAction). "walk" is shown as "step".
+    try {
+        $acts = @($state.afkActions); if ($acts.Count -eq 0) { $acts = @("jump") }
+        return @{
+            on = $(if ($on -is [bool]) { $on } else { $null }); mode = $(if ($state.afkMode -eq "hidden") { "hidden" } else { "quick" }); minutes = $state.afkMinutes
+            jump = ($acts -contains "jump"); step = ($acts -contains "walk"); zoom = ($acts -contains "zoom"); click = ($acts -contains "click")
+            skipActive = [bool]$state.afkSkipActive; jitter = [bool]$state.afkJitter }
+    } catch { return $null }
+}
+
+function Get-AfkStateEvent($diag, $fields) {
+    # afk.state when these settings differ from the ones logged last (and the first time).
+    try {
+        if (-not $fields) { return $null }
+        $sig = (@($fields.Keys | Sort-Object) | ForEach-Object { "$_=$($fields[$_])" }) -join ";"
+        if ($diag) { if ($diag.LastState -ceq $sig) { return $null }; $diag.LastState = $sig }
+        return @{ Ev = "afk.state"; Fields = $fields }
+    } catch { return $null }
+}
+
+function Write-AfkDiagEvents($log, $events) {
+    # Queues the events (memory only: the disk is written at the end of the 1-second tick). Never throws.
+    if (-not $log) { return }
+    foreach ($e in @($events)) { try { if ($e -is [System.Collections.IDictionary] -and $e.Ev) { Write-BkLog $log ("" + $e.Ev) $e.Fields } } catch { } }
+}
+
 if ($TestOnly) { return }
 
 # ------------------------------------------------------------------ setup --
@@ -1653,6 +2207,9 @@ if (-not $gotLock) { [void]$script:ShowSignal.Set(); return }
 function Release-Instance { try { $script:InstanceLock.ReleaseMutex() } catch {} }
 
 trap {
+    # The log gets it first (the app ends right after this box): which line, which kind of error,
+    # and its message only when the log can clean it. Written right away.
+    if ($script:BkLog) { try { Write-BkLog $script:BkLog "app.error" (ConvertTo-BkErrorFields $_ $true); Flush-BkLog $script:BkLog -Force } catch { } }
     # The line number tells exactly where, when someone sends a screenshot of this box.
     [System.Windows.MessageBox]::Show("Sorry, something went wrong:`n`n$_`n`n(BloxKit $BkVersion, BloxKit.ps1 line $($_.InvocationInfo.ScriptLineNumber))", "BloxKit", "OK", "Error") | Out-Null
     $global:RmlErrorShown = $true   # BloxKit.exe then doesn't show a second box
@@ -2017,6 +2574,7 @@ $script:SaveError = ""
 
 function Load-Settings {
     $r = Read-SettingsFile $SettingsFile
+    $script:SettingsSource = $(if ($r.Ok) { $r.Source } else { "locked" })   # for the log's app.start
     if (-not $r.Ok) { $script:SettingsLocked = $true; $script:LoadError = $r.Error; return }
     if ($r.Source -eq "backup" -and (Test-Path -LiteralPath $SettingsFile)) {
         # Keep the unreadable file: the next save would otherwise turn it into the .bak copy.
@@ -2026,6 +2584,11 @@ function Load-Settings {
     $script:LoadNote = (@($r.Warnings) -join "`n")
 }
 function Save-Settings {
+    if ($script:BkLog) {
+        # Every change goes through here: the log learns new names and links first. If that fails, the
+        # log stops for this run (it never writes with an outdated privacy list); saving goes on.
+        try { Update-BkLogSecrets } catch { try { $script:BkLog.Off = $true; $script:BkLog.Notice = "The diagnostics log is off for this run: its privacy list couldn't be updated." } catch { } }
+    }
     if ($script:SkipSave -or $script:SettingsLocked) { return }
     $err = Write-SettingsFile $script:State $SettingsFile
     if ($err -and $err -ne $script:SaveError) { Say "Couldn't save your settings: $err" }   # once, not on every save
@@ -2115,6 +2678,62 @@ if (Test-Path $SessionFile) {
         }
     } catch {}
 }
+
+# ------------------------------------------------------------ diagnostics --
+# BloxKit's own log, in logs\ next to the settings (a -NoRoblox test copy uses logs\test, so it
+# never shares files with the real one). What it may hold: see "diagnostics" near the top.
+# Events are written at state changes only; the 1-second tick sweeps $Error and writes the queue
+# after everything else in it (anti-AFK included), so no round ever waits on the disk.
+# Best effort throughout: if the log can't be set up (its privacy list included), logging stays off
+# for the run, and nothing here can stop start-up, saving settings, the tick, anti-AFK or closing.
+$script:BkLog = $null
+$script:BkLogNoticeShown = $false
+$script:ExitReason = "exit"   # app.stop: exit | update | import
+function Update-BkLogSecrets {
+    # What the log must never hold, from the settings as they are now. Chrome's profile names are
+    # read again only when the accounts' profile folders change (reading them takes a moment).
+    $dirs = (@($script:State.accounts | ForEach-Object { "" + $_.profileDir }) | Sort-Object) -join "|"
+    if ($dirs -cne $script:BkLogChrome.Dirs) { $script:BkLogChrome = @{ Dirs = $dirs; Names = @(Get-ChromeProfiles | ForEach-Object { "" + $_.Name }) } }
+    Set-BkLogSecrets $script:BkLog (Get-BkLogSecretValues $script:State $script:BkLogChrome.Names)
+}
+function Step-BkLog([switch]$Final) {
+    # Errors noted since the last time, anti-AFK's settings when they changed (the first time too,
+    # wherever they were changed from), then one write. -Final (closing): also how often each kind of
+    # error came back and why BloxKit closes, written right away. Never throws into the tick or closing.
+    if (-not $script:BkLog) { return }
+    try {
+        Invoke-BkErrorSweep $script:BkErrors $script:BkLog $Error
+        Write-AfkDiagEvents $script:BkLog @(Get-AfkStateEvent $script:AfkDiag (Get-AfkStateFields $script:AfkOn $script:State))
+        if ($Final) {
+            Write-BkErrorSummary $script:BkErrors $script:BkLog
+            Write-BkLog $script:BkLog "app.stop" @{ reason = $script:ExitReason; uptimeSec = [int]$script:BkLogClock.Elapsed.TotalSeconds; dropped = [int]$script:BkLog.Dropped }
+            Flush-BkLog $script:BkLog -Force
+            return
+        }
+        Flush-BkLog $script:BkLog
+        if ($script:BkLog.Off -and -not $script:BkLogNoticeShown) { $script:BkLogNoticeShown = $true; Say $script:BkLog.Notice }   # once, in words
+    } catch { }
+}
+function Start-BkLog {
+    # Sets up the log and queues app.start. If any of it fails, the privacy list included, logging
+    # stays off for this run (it never writes without that list) and BloxKit starts as usual.
+    try {
+        $log = New-BkLog $(if ($NoRoblox) { Join-Path (Join-Path $AppDir "logs") "test" } else { Join-Path $AppDir "logs" }) (New-BkLogFilePort)
+        $script:BkLogClock = [System.Diagnostics.Stopwatch]::StartNew()
+        $script:BkErrors = New-BkErrorSweep $MaximumErrorCount
+        $script:BkErrors.Seen = $(if ($Error.Count -gt 0) { $Error[0] } else { $null })   # only errors from here on are swept
+        $script:BkLogChrome = @{ Dirs = $null; Names = @() }
+        $script:BkLog = $log
+        Update-BkLogSecrets
+        Write-BkLog $script:BkLog "app.start" @{
+            version = $BkVersion; scriptWritten = $(if ($PSCommandPath -and [IO.File]::Exists($PSCommandPath)) { [IO.File]::GetLastWriteTime($PSCommandPath) } else { $null })   # (no error noted when it's missing)
+            host = $(if ($env:RML_LAUNCHER) { "exe" } else { "powershell" }); psVersion = "" + $PSVersionTable.PSVersion; osBuild = Get-BkOsBuild
+            testMode = [bool]$NoRoblox; settingsSource = $script:SettingsSource; accounts = @($script:State.accounts).Count; screensRestored = $script:SessionRestore.Count
+        }
+    } catch { $script:BkLog = $null }
+}
+Start-BkLog
+
 function Save-Session {
     $list = @()
     foreach ($w in $script:Wins) {
@@ -5592,7 +6211,34 @@ function Pick-AfkAction {
     return $acts[$script:Rng.Next(0, $acts.Count)]
 }
 
-function Do-Jumps([switch]$Manual) {
+$script:AfkDiag = New-AfkDiag   # for the log: the last reason a round was refused
+function Invoke-AfkPassLogged($picks, [bool]$hidden, [IntPtr]$back, [string]$trigger) {
+    # Invoke-AfkPass, then (after the keyboard has gone back) the round's diagnostics are queued:
+    # memory only, and only when something went wrong. The round itself is exactly the same.
+    $wasStuck = [bool]$script:AfkFocus.Stuck
+    $clock = [System.Diagnostics.Stopwatch]::StartNew()
+    $pass = Invoke-AfkPass $picks $hidden $back
+    if ($script:BkLog) {
+        try {
+            $kind = Get-AfkWindowKind $script:InputPort $pass.Back (Get-AfkFocusContext)
+            Write-AfkDiagEvents $script:BkLog @(Get-AfkRoundEvents $script:AfkDiag $pass $trigger $(if ($hidden) { "hidden" } else { "quick" }) $clock.ElapsedMilliseconds $kind $wasStuck ([bool]$script:AfkFocus.Stuck))
+        } catch { }
+    }
+    return $pass
+}
+function Write-AfkDiagNotStarted([string]$why) {
+    # A refused round, for the log (once per reason in a row). Memory only.
+    if (-not $script:BkLog) { return }
+    try { Write-AfkDiagEvents $script:BkLog @(Get-AfkNotStartedEvent $script:AfkDiag $why (Get-AfkWindowKind $script:InputPort ([RbxCore]::GetForegroundWindow()) (Get-AfkFocusContext))) } catch { }
+}
+function Write-AfkDiagUnstuck {
+    # The keyboard is free again (you're back in a window of yours), for the log. Memory only.
+    if (-not $script:BkLog) { return }
+    try { Write-AfkDiagEvents $script:BkLog @(New-AfkUnstuckEvent (Get-AfkWindowKind $script:InputPort ([RbxCore]::GetForegroundWindow()) (Get-AfkFocusContext))) } catch { }
+}
+
+function Do-Jumps([switch]$Manual, [string]$Source = "timer") {
+    # -Source (timer | button | tray | hotkey) is only for the log; -Manual decides what happens.
     $targets = @(Get-Targets)
     if ($targets.Count -eq 0) { Say "No screens to keep awake (turn AFK on for at least one screen)."; return $true }
     $hidden = $script:State.afkMode -eq "hidden"
@@ -5605,9 +6251,9 @@ function Do-Jumps([switch]$Manual) {
     # Where the keyboard goes back afterwards. When there's no such window, or the last round couldn't
     # give it back and Roblox still has it, this round is skipped: anti-AFK never takes it on a guess.
     $start = Get-AfkPassStart $script:AfkFocus $script:InputPort ([RbxCore]::GetForegroundWindow()) (Get-AfkFocusContext)
-    if (-not $start.Ok) { Say-AfkFocus $start.Why -Always:$Manual; return $true }
+    if (-not $start.Ok) { Say-AfkFocus $start.Why -Always:$Manual; Write-AfkDiagNotStarted $start.Why; return $true }
     $t = Get-Date -Format "HH:mm"
-    $pass = Invoke-AfkPass $picks $hidden $start.Back
+    $pass = Invoke-AfkPassLogged $picks $hidden $start.Back $Source
     foreach ($r in @($pass.Results)) { Set-AfkTileResult $r $t }
     if ($hidden -and $pass.Restored) {
         # Measured on Roblox: a hidden visit gets through about 3 times in 4, and when it doesn't,
@@ -5661,7 +6307,7 @@ $AfkAgainTimer.Add_Tick({
     if ($again.Count -and $script:State.afkMode -eq "hidden" -and [RbxCore]::IdleMs() -ge 1000 -and (Test-AfkRepeatOk $script:InputPort ([RbxCore]::GetForegroundWindow()) $first)) {
         # A screen the first visit skipped shows this one's success; a skip here doesn't hide the first one's.
         $t = Get-Date -Format "HH:mm"
-        $pass = Invoke-AfkPass $again $true $first.Back
+        $pass = Invoke-AfkPassLogged $again $true $first.Back "repeat"
         foreach ($r in @($pass.Results)) { if ("$($r.Sent)" -eq "Sent") { Set-AfkTileResult $r $t } }
         if (-not $pass.Restored) { Say-AfkFocus $pass.Why }
     }
@@ -5675,12 +6321,12 @@ function Test-HiddenJump($w) {
     if ($r -ne "OK") { return }
     Start-Sleep -Milliseconds 300
     $start = Get-AfkPassStart $script:AfkFocus $script:InputPort ([RbxCore]::GetForegroundWindow()) (Get-AfkFocusContext)
-    if (-not $start.Ok) { [BkBox]::Show((Get-AfkFocusText $start.Why), "Test anti-AFK", "OK", "Warning") | Out-Null; return }
+    if (-not $start.Ok) { Write-AfkDiagNotStarted $start.Why; [BkBox]::Show((Get-AfkFocusText $start.Why), "Test anti-AFK", "OK", "Warning") | Out-Null; return }
     $results = @(); $lost = ""
     foreach ($a in $acts) {
         # Like a real round: a hidden visit, and a second one 1.5 s later (a click shows the window once).
-        $pass = Invoke-AfkPass @(@{ W = $w; Act = $a }) $true $start.Back; $results += @($pass.Results)
-        if ($pass.Restored -and $a -ne "click") { Start-Sleep -Milliseconds 1500; $pass = Invoke-AfkPass @(@{ W = $w; Act = $a }) $true $start.Back; $results += @($pass.Results) }
+        $pass = Invoke-AfkPassLogged @(@{ W = $w; Act = $a }) $true $start.Back "test"; $results += @($pass.Results)
+        if ($pass.Restored -and $a -ne "click") { Start-Sleep -Milliseconds 1500; $pass = Invoke-AfkPassLogged @(@{ W = $w; Act = $a }) $true $start.Back "test"; $results += @($pass.Results) }
         if (-not $pass.Restored) { $lost = $pass.Why; break }   # the keyboard didn't come back: no more visits
         Start-Sleep -Milliseconds 900
     }
@@ -6118,6 +6764,7 @@ function Import-Backup {
     $err = Write-SettingsFile $r.State $SettingsFile
     if ($err) { [BkBox]::Show("Couldn't load the backup, nothing was changed.`n`n$err", "Load backup", "OK", "Warning") | Out-Null; return }
     $script:SkipSave = $true
+    $script:ExitReason = "import"   # for the log's app.stop
     Release-Instance   # let the restarted copy start
     $cmd = Get-AppCommand
     if ($cmd.Args) { Start-Process $cmd.File -ArgumentList $cmd.Args } else { Start-Process $cmd.File }
@@ -6164,7 +6811,7 @@ foreach ($it in $TrayMenu.Items) { $it.ForeColor = [System.Drawing.ColorTranslat
 $Tray.ContextMenuStrip = $TrayMenu
 $TrayOpen.Add_Click({ Show-App })
 $TrayAfkItem.Add_Click({ Set-Afk (-not $script:AfkOn) })
-$TrayJump.Add_Click({ Do-Jumps -Manual | Out-Null; Reset-Countdown })
+$TrayJump.Add_Click({ Do-Jumps -Manual -Source tray | Out-Null; Reset-Countdown })
 $TrayExit.Add_Click({ $script:ReallyExit = $true; $win.Close() })
 $Tray.Add_DoubleClick({ Show-App })
 $Tray.Visible = $true
@@ -6410,7 +7057,7 @@ foreach ($k in $ActBoxes.Keys) {
         Update-AfkUi
     })
 }
-$ui.JumpNowBtn.Add_Click({ Do-Jumps -Manual | Out-Null; Reset-Countdown })
+$ui.JumpNowBtn.Add_Click({ Do-Jumps -Manual -Source button | Out-Null; Reset-Countdown })
 $ui.MinutesBox.Add_SelectionChanged({ $script:State.afkMinutes = [int]$ui.MinutesBox.SelectedItem; Save-Settings; Reset-Countdown })
 # Checked, not Click: saved however the choice changes (mouse, keyboard, or the anti-AFK test).
 $ui.ModeHidden.Add_Checked({ if ($script:State.afkMode -ne "hidden") { $script:State.afkMode = "hidden"; Save-Settings } })
@@ -6650,6 +7297,7 @@ function Start-Update {
     Copy-Item -LiteralPath $upd $tmp -Force
     Start-Process powershell -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$tmp`" -AppDir `"$PSScriptRoot`" -WaitPid $PID -Restart -Quiet"
     Say "Updating BloxKit... it opens again in a few seconds."
+    $script:ExitReason = "update"   # for the log's app.stop
     Release-Instance   # so the updated copy can start
     $script:ReallyExit = $true
     $win.Close()
@@ -6706,6 +7354,7 @@ $win.Add_Closing({
     if ($win.WindowState -ne "Minimized") { $script:State.winMax = $win.WindowState -eq "Maximized" }
     if (Test-PlanActive) { Save-PlanRun; Add-PlanHistory "The app closed. The schedule will be paused when it opens again." }
     Save-Settings; Save-Session
+    Step-BkLog -Final   # the log's last write, before another copy can start (Release-Instance below)
     foreach ($w in $script:Wins) { [RbxCore]::RemoveScreen($w.Thumb) }
     Apply-Efficiency -AllOff   # leave Roblox windows the way we found them
     $Tray.Visible = $false; $Tray.Dispose()
@@ -6726,11 +7375,12 @@ $Tick.Add_Tick({
         if ($script:ShowSignal.WaitOne(0)) { Show-App }
         if (Test-PlanActive) { Invoke-Plan "tick"; if ($ui.TabSchedule.IsSelected) { Update-ScheduleLive } }
         if ($script:TickCount % 5 -eq 2 -and $win.IsVisible) { try { Update-LoadMonitor } catch {} }
+        Step-BkLog
         return
     }
     if ($script:ShowSignal.WaitOne(0)) { Show-App }   # someone started the app again
     # The window you're using, for anti-AFK to give the keyboard back to; being back in one also ends a stuck keyboard.
-    if (Watch-AfkFocus $script:AfkFocus $script:InputPort ([RbxCore]::GetForegroundWindow()) (Get-AfkFocusContext)) { Say "Anti-AFK carries on: you're back in a window of yours." }
+    if (Watch-AfkFocus $script:AfkFocus $script:InputPort ([RbxCore]::GetForegroundWindow()) (Get-AfkFocusContext)) { Say "Anti-AFK carries on: you're back in a window of yours."; Write-AfkDiagUnstuck }
     if ($script:TickCount % 2 -eq 0) { Refresh-Windows; Place-Screens }
     if ($script:PendingRejoin.Count -gt 0) {
         $list = @($script:PendingRejoin); $script:PendingRejoin.Clear()
@@ -6761,6 +7411,7 @@ $Tick.Add_Tick({
             if (Do-Jumps) { Reset-Countdown } else { $script:Waiting = $true; Update-AfkUi }
         } else { Update-AfkUi }
     }
+    Step-BkLog   # last: after anti-AFK has given the keyboard back, never in the middle of a round
 })
 
 # Hotkeys (Ctrl+Alt+key). Registered with Windows, so they fire instantly with no polling.
@@ -6770,7 +7421,7 @@ for ($i = 1; $i -le 9; $i++) { $HotKeys += @{ Vk = 0x30 + $i; Act = "play$i" } }
 function Invoke-HotKey([string]$act) {
     switch -Regex ($act) {
         '^back$' { Back-To-App }
-        '^jump$' { Do-Jumps -Manual | Out-Null; Reset-Countdown }
+        '^jump$' { Do-Jumps -Manual -Source hotkey | Out-Null; Reset-Countdown }
         '^afk$'  { Set-Afk (-not $script:AfkOn) }
         '^play(\d)$' {
             $n = [int]$Matches[1]
