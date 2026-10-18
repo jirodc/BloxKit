@@ -1670,6 +1670,8 @@ $BkLogSchema = @{
     "update.start"      = @{ Level = "info";  Fields = [ordered]@{ from = "version"; to = "version" } }
     "multiwindow"       = @{ Level = "info";  Fields = [ordered]@{ state = "enum:on|off" } }
     "backup.import"     = @{ Level = "info";  Fields = [ordered]@{ result = "enum:restart|unreadable|nocopy|notsaved"; accounts = "int" } }
+    "ui.stall"          = @{ Level = "warn";  Fields = [ordered]@{ durationMs = "int"; section = "enum:tick|mascot|update|refresh|rejoin|status|disconnects|logs|schedule|mute|session|efficiency|tray|graphics|perf|afk|test|webhook|log|other" } }
+    "ui.stalls"         = @{ Level = "info";  Fields = [ordered]@{ count = "int"; longestMs = "int"; totalMs = "int" } }
     "log.dropped"       = @{ Level = "warn";  Fields = [ordered]@{ count = "int"; rejected = "int" } }
 }
 $BkLogRank = @{ info = 0; warn = 1; error = 2 }
@@ -2285,6 +2287,127 @@ function Get-MultiWindowEvent($diag, [bool]$on) {
     } catch { return $null }
 }
 
+# ----- UI stalls: when BloxKit's window can't react for a second or more -----
+# The UI thread beats (BkStallWatch.Beat) from a timer every 250 ms; a background thread
+# (Check, every 100 ms) notices when a beat is a second overdue and notes what the UI thread was
+# doing then (Section, set by Set-BkSection as the tick goes through its parts). The next beat
+# completes the stall: how late it was beyond its interval, so never more than it really was.
+# Not stalls: anything before the first beat (start-up), a PC that was asleep (the watchdog didn't
+# run either), and anything after Stop (closing). Open dialogs keep the UI thread answering.
+# The watchdog never touches PowerShell, the window or the disk; the tick takes its stalls (Take)
+# and queues them as ui.stall through the log, like any other event.
+$BkStallSections = @("tick", "mascot", "update", "refresh", "rejoin", "status", "disconnects", "logs", "schedule", "mute", "session", "efficiency", "tray", "graphics", "perf", "afk", "test", "webhook", "log", "other")
+$BkStallSource = @'
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading;
+
+public sealed class BkStall { public long DurationMs; public string Section; }
+
+public sealed class BkStallWatch {
+    public Func<long> Clock;                 // milliseconds (a Stopwatch; tests set their own)
+    public int IntervalMs = 250, ThresholdMs = 1000, PollMs = 100, MaxQueued = 50;
+    public volatile string Section = "other";
+    readonly object gate = new object();
+    readonly Queue<BkStall> done = new Queue<BkStall>();
+    long beat, lastCheck, count, longest, total;
+    int overflow;
+    bool armed, stuck, paused;
+    volatile bool stopped;
+    string stuckIn;
+    Thread thread;
+
+    public BkStallWatch() { Stopwatch sw = Stopwatch.StartNew(); Clock = delegate { return sw.ElapsedMilliseconds; }; }
+
+    // UI thread, from the heartbeat timer. The first beat arms it.
+    public void Beat() {
+        try {
+            lock (gate) {
+                if (stopped) return;
+                long now = Clock();
+                if (!armed) { armed = true; beat = now; lastCheck = now; return; }
+                long late = now - beat - IntervalMs;
+                if (late >= ThresholdMs && !paused) Add(late, stuck ? stuckIn : "other");
+                beat = now; stuck = false; paused = false; stuckIn = null;
+            }
+        } catch { }
+    }
+
+    // Watchdog thread. If it didn't get to run for a threshold itself, the whole PC or process
+    // was paused (sleep, hibernate): whatever is overdue now isn't the UI's doing.
+    public void Check() {
+        try {
+            lock (gate) {
+                if (stopped || !armed) return;
+                long now = Clock();
+                if (now - lastCheck >= ThresholdMs + PollMs) paused = true;
+                lastCheck = now;
+                if (!stuck && !paused && now - beat - IntervalMs >= ThresholdMs) { stuck = true; stuckIn = Section; }
+            }
+        } catch { }
+    }
+
+    void Add(long ms, string section) {
+        count++; total += ms; if (ms > longest) longest = ms;
+        if (done.Count >= MaxQueued) { overflow++; return; }
+        BkStall s = new BkStall(); s.DurationMs = ms; s.Section = section ?? "other";
+        done.Enqueue(s);
+    }
+
+    public BkStall[] Take() { try { lock (gate) { BkStall[] a = done.ToArray(); done.Clear(); return a; } } catch { return new BkStall[0]; } }
+    public int TakeOverflow() { lock (gate) { int n = overflow; overflow = 0; return n; } }
+    public long[] Totals() { lock (gate) { return new long[] { count, longest, total }; } }   // every stall this run
+
+    public void Start() {
+        lock (gate) {
+            if (thread != null || stopped) return;
+            thread = new Thread(Run);
+            thread.IsBackground = true;                       // never keeps BloxKit open
+            thread.Priority = ThreadPriority.AboveNormal;     // still looks when Roblox keeps the PC busy
+            thread.Name = "BloxKit UI watchdog";
+            thread.Start();
+        }
+    }
+    void Run() {
+        while (!stopped) {
+            try { Thread.Sleep(PollMs); if (!stopped) Check(); } catch { }   // nothing here may end the process
+        }
+    }
+    public void Stop() { stopped = true; }
+    public bool Running { get { Thread t = thread; return t != null && t.IsAlive; } }
+}
+'@
+function Set-BkSection([string]$name) {
+    # What the UI thread is doing now, for ui.stall (one of $BkStallSections). Without a watchdog
+    # it does nothing. Never throws.
+    if ($script:BkStall) { try { $script:BkStall.Section = $name } catch { } }
+}
+function Get-BkSection { if ($script:BkStall) { try { return "" + $script:BkStall.Section } catch { } }; return "other" }
+function Get-BkStallEvents($watch, $log) {
+    # The stalls finished since last time, as ui.stall events (memory only). Stalls that didn't fit
+    # while waiting count as dropped. Never throws.
+    $out = @()
+    try {
+        if (-not $watch) { return $out }
+        foreach ($s in @($watch.Take())) {
+            $out += @{ Ev = "ui.stall"; Fields = @{ durationMs = [long]$s.DurationMs; section = $(if ($BkStallSections -ccontains ("" + $s.Section)) { "" + $s.Section } else { "other" }) } }
+        }
+        $o = [int]$watch.TakeOverflow()
+        if ($o -gt 0 -and $log) { $log.Dropped += $o; $log.DropsToReport += $o }
+    } catch { }
+    return $out
+}
+function Get-BkStallSummary($watch) {
+    # ui.stalls at closing: how many this run, the longest and the total (none: no line).
+    try {
+        if (-not $watch) { return $null }
+        $t = $watch.Totals()
+        if ([long]$t[0] -le 0) { return $null }
+        return @{ Ev = "ui.stalls"; Fields = @{ count = [long]$t[0]; longestMs = [long]$t[1]; totalMs = [long]$t[2] } }
+    } catch { return $null }
+}
+
 if ($TestOnly) { return }
 
 # ------------------------------------------------------------------ setup --
@@ -2802,8 +2925,10 @@ function Step-BkLog([switch]$Final) {
         Invoke-BkErrorSweep $script:BkErrors $script:BkLog $Error
         Write-AfkDiagEvents $script:BkLog @(Get-AfkStateEvent $script:AfkDiag (Get-AfkStateFields $script:AfkOn $script:State))
         if (-not $NoRoblox) { $mw = Get-MultiWindowEvent $script:BkDiag ($script:Locks.Count -gt 0); if ($mw) { Write-BkDiag $mw.Ev $mw.Fields } }   # wherever the locks were taken
+        foreach ($s in @(Get-BkStallEvents $script:BkStall $script:BkLog)) { Write-BkDiag $s.Ev $s.Fields }   # found by the watchdog thread
         if ($Final) {
             Write-BkErrorSummary $script:BkErrors $script:BkLog
+            $sum = Get-BkStallSummary $script:BkStall; if ($sum) { Write-BkDiag $sum.Ev $sum.Fields }
             Write-BkLog $script:BkLog "app.stop" @{ reason = $script:ExitReason; uptimeSec = [int]$script:BkLogClock.Elapsed.TotalSeconds; dropped = [int]$script:BkLog.Dropped }
             Flush-BkLog $script:BkLog -Force
             return
@@ -2817,6 +2942,25 @@ function Write-BkDiag([string]$ev, $fields) {
     # only), within its per-run budget. Does nothing with logging off, and never throws.
     if (-not $script:BkLog) { return }
     try { if (Test-BkDiagBudget $script:BkDiag $script:BkLog $ev) { Write-BkLog $script:BkLog $ev $fields } } catch { }
+}
+function Start-BkStallWatch {
+    # The UI stall watchdog and its 250 ms heartbeat (Input priority: a late beat means BloxKit
+    # couldn't have reacted to you). Only with the log on; if it can't start, BloxKit runs without it.
+    if (-not $script:BkLog) { return }
+    try {
+        if (-not ("BkStallWatch" -as [type])) { Add-Type -TypeDefinition $BkStallSource }
+        $watch = New-Object BkStallWatch
+        $beat = New-Object System.Windows.Threading.DispatcherTimer ([System.Windows.Threading.DispatcherPriority]::Input)
+        $beat.Interval = [TimeSpan]::FromMilliseconds($watch.IntervalMs)
+        $beat.Add_Tick({ try { $script:BkStall.Beat() } catch { } })
+        $script:BkStall = $watch; $script:BkStallBeat = $beat
+        $beat.Start(); $watch.Start()
+    } catch { $script:BkStall = $null; $script:BkStallBeat = $null }
+}
+function Stop-BkStallWatch {
+    # At closing, before its slow saves: those aren't stalls. What was found is still logged.
+    try { if ($script:BkStallBeat) { $script:BkStallBeat.Stop() } } catch { }
+    try { if ($script:BkStall) { $script:BkStall.Stop() } } catch { }
 }
 function Write-ScreenDiag([string]$ev, $w, $claims = @()) {
     # screen.add (claimed: a launch's window) or screen.remove (kind: replaced by the same account's
@@ -6087,7 +6231,7 @@ function Build-Wall {
                     param($m,$x)
                     $tg = $m.Tag
                     switch ($tg.Act) {
-                        "test"      { Test-HiddenJump $tg.W }
+                        "test"      { Set-BkSection "test"; Test-HiddenJump $tg.W; Set-BkSection "other" }
                         "spot"      { Start-PickSpot $tg.W }
                         "spotreset" {
                             $tg.W.ClickX = 0.5; $tg.W.ClickY = 0.5
@@ -6349,8 +6493,10 @@ function Invoke-AfkPassLogged($picks, [bool]$hidden, [IntPtr]$back, [string]$tri
     # Invoke-AfkPass, then (after the keyboard has gone back) the round's diagnostics are queued:
     # memory only, and only when something went wrong. The round itself is exactly the same.
     $wasStuck = [bool]$script:AfkFocus.Stuck
+    $section = Get-BkSection; Set-BkSection "afk"   # a stall now is the round's (the round itself is unchanged)
     $clock = [System.Diagnostics.Stopwatch]::StartNew()
     $pass = Invoke-AfkPass $picks $hidden $back
+    Set-BkSection $section
     if ($script:BkLog) {
         try {
             $kind = Get-AfkWindowKind $script:InputPort $pass.Back (Get-AfkFocusContext)
@@ -6619,6 +6765,7 @@ function Test-HookUrl([string]$u) { return ($u -match '^https://(ptb\.|canary\.)
 function Send-Webhook([string]$text) {
     $u = $script:State.webhook
     if (-not (Test-HookUrl $u)) { return $false }
+    $section = Get-BkSection; Set-BkSection "webhook"   # it waits for Discord (Phase 3b moves this off the UI thread)
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         $body = @{ username = "BloxKit"; content = $text } | ConvertTo-Json
@@ -6627,7 +6774,7 @@ function Send-Webhook([string]$text) {
     } catch {
         Say "Couldn't send the Discord alert. Check the webhook link in Settings."
         return $false
-    }
+    } finally { Set-BkSection $section }
 }
 
 # ----- 'Disconnected' box check -----
@@ -7483,6 +7630,7 @@ $win.Add_Closing({
         $r = [BkBox]::Show("Accounts are still opening. Close anyway?", "BloxKit", "YesNo", "Question")
         if ($r -ne "Yes") { $e.Cancel = $true; return }
     }
+    Stop-BkStallWatch   # closing's saves below aren't stalls
     $QueueTimer.Stop(); $Tick.Stop(); $Keys.Stop(); $TabTimer.Stop()
     if ($script:TabListener) { try { $script:TabListener.Stop() } catch {} }
     $HotKeyWin.Clear(); $HotKeyWin.DestroyHandle()
@@ -7506,50 +7654,54 @@ $Tick = New-Object System.Windows.Threading.DispatcherTimer
 $Tick.Interval = [TimeSpan]::FromSeconds(1)
 $Tick.Add_Tick({
     $script:TickCount++
-    Update-Mascot   # the mascot and its line follow what's really happening
-    if ($script:UpdTask) { Read-UpdateCheck }
+    Set-BkSection "tick"   # what the UI thread is doing, for ui.stall
+    Set-BkSection "mascot"; Update-Mascot   # the mascot and its line follow what's really happening
+    Set-BkSection "update"; if ($script:UpdTask) { Read-UpdateCheck }
     if ($script:TickCount % 21600 -eq 0) { Start-UpdateCheck }   # and again every 6 hours while it's open
     if ($NoRoblox) {   # tests: no Roblox windows, only the schedule's clock
         if ($script:ShowSignal.WaitOne(0)) { Show-App }
-        if (Test-PlanActive) { Invoke-Plan "tick"; if ($ui.TabSchedule.IsSelected) { Update-ScheduleLive } }
-        if ($script:TickCount % 5 -eq 2 -and $win.IsVisible) { try { Update-LoadMonitor } catch {} }
-        Step-BkLog
+        Set-BkSection "schedule"; if (Test-PlanActive) { Invoke-Plan "tick"; if ($ui.TabSchedule.IsSelected) { Update-ScheduleLive } }
+        if ($script:TickCount % 5 -eq 2 -and $win.IsVisible) { Set-BkSection "perf"; try { Update-LoadMonitor } catch {} }
+        Set-BkSection "log"; Step-BkLog; Set-BkSection "other"
         return
     }
-    if ($script:ShowSignal.WaitOne(0)) { Show-App }   # someone started the app again
+    Set-BkSection "tick"; if ($script:ShowSignal.WaitOne(0)) { Show-App }   # someone started the app again
     # The window you're using, for anti-AFK to give the keyboard back to; being back in one also ends a stuck keyboard.
     if (Watch-AfkFocus $script:AfkFocus $script:InputPort ([RbxCore]::GetForegroundWindow()) (Get-AfkFocusContext)) { Say "Anti-AFK carries on: you're back in a window of yours."; Write-AfkDiagUnstuck }
-    if ($script:TickCount % 2 -eq 0) { Refresh-Windows; Place-Screens }
+    if ($script:TickCount % 2 -eq 0) { Set-BkSection "refresh"; Refresh-Windows; Place-Screens }
     if ($script:PendingRejoin.Count -gt 0) {
+        Set-BkSection "rejoin"
         $list = @($script:PendingRejoin); $script:PendingRejoin.Clear()
         foreach ($a in $list) { Rejoin-Account $a }
     }
-    if ($script:TickCount % 3 -eq 0) { Update-Status }
-    if ($script:TickCount % 30 -eq 0) { Check-Disconnects }
-    if ($script:TickCount % 3 -eq 1) { Watch-Logs }
-    if ($script:TickCount % 20 -eq 0) { Check-Schedule; Update-LiveTexts }
+    if ($script:TickCount % 3 -eq 0) { Set-BkSection "status"; Update-Status }
+    if ($script:TickCount % 30 -eq 0) { Set-BkSection "disconnects"; Check-Disconnects }
+    if ($script:TickCount % 3 -eq 1) { Set-BkSection "logs"; Watch-Logs }
+    if ($script:TickCount % 20 -eq 0) { Set-BkSection "schedule"; Check-Schedule; Update-LiveTexts }
     if ($script:TickCount % 5 -eq 0) {
         # Both ways: Windows can hand a new Roblox client the mute of an old one (they're the same program).
-        foreach ($w in $script:Wins) { [RbxCore]::SetProcessMute([RbxCore]::PidOf($w.Handle), [bool]$w.Muted) | Out-Null }
-        if ($script:SessionDirty) { Save-Session }
+        Set-BkSection "mute"; foreach ($w in $script:Wins) { [RbxCore]::SetProcessMute([RbxCore]::PidOf($w.Handle), [bool]$w.Muted) | Out-Null }
+        if ($script:SessionDirty) { Set-BkSection "session"; Save-Session }
     }
-    if ($script:TickCount % 10 -eq 5) { Apply-Efficiency -Force }
-    if ($script:TickCount % 10 -eq 6) { Close-RobloxTray }      # Roblox's leftover tray copy (before the graphics check below)
-    if ($script:TickCount % 10 -eq 7) { Sync-RobloxGraphics }   # keeps Roblox on the picked graphics while none is running
-    if ($script:TickCount % 3 -eq 2 -and $ui.TabSettings.IsSelected -and $win.IsVisible) { Update-PerfUi }   # so Save to Roblox and the line under it follow what is running
+    if ($script:TickCount % 10 -eq 5) { Set-BkSection "efficiency"; Apply-Efficiency -Force }
+    if ($script:TickCount % 10 -eq 6) { Set-BkSection "tray"; Close-RobloxTray }      # Roblox's leftover tray copy (before the graphics check below)
+    if ($script:TickCount % 10 -eq 7) { Set-BkSection "graphics"; Sync-RobloxGraphics }   # keeps Roblox on the picked graphics while none is running
+    if ($script:TickCount % 3 -eq 2 -and $ui.TabSettings.IsSelected -and $win.IsVisible) { Set-BkSection "perf"; Update-PerfUi }   # so Save to Roblox and the line under it follow what is running
     # Your PC right now (Live screens): one ~10 ms reading every 5 s while the window is open.
-    if ($script:TickCount % 5 -eq 2 -and $win.IsVisible -and $win.WindowState -ne "Minimized") { try { Update-LoadMonitor } catch {} }
+    if ($script:TickCount % 5 -eq 2 -and $win.IsVisible -and $win.WindowState -ne "Minimized") { Set-BkSection "perf"; try { Update-LoadMonitor } catch {} }
     if (Test-PlanActive) {
-        Invoke-Plan "tick"
+        Set-BkSection "schedule"; Invoke-Plan "tick"
         if ($ui.TabSchedule.IsSelected) { Update-ScheduleLive }
     }
     if ($script:AfkOn) {
+        Set-BkSection "afk"
         if ($script:SecondsLeft -gt 0) { $script:SecondsLeft-- }
         if ($script:SecondsLeft -le 0) {
             if (Do-Jumps) { Reset-Countdown } else { $script:Waiting = $true; Update-AfkUi }
         } else { Update-AfkUi }
     }
-    Step-BkLog   # last: after anti-AFK has given the keyboard back, never in the middle of a round
+    Set-BkSection "log"; Step-BkLog   # last: after anti-AFK has given the keyboard back, never in the middle of a round
+    Set-BkSection "other"   # whatever runs until the next tick (a click, a dialog) is "other"
 })
 
 # Hotkeys (Ctrl+Alt+key). Registered with Windows, so they fire instantly with no polling.
@@ -7655,6 +7807,7 @@ if (Test-Path -LiteralPath $UpdNote) {
 Update-UpdateUi
 Start-UpdateCheck   # in the background; the pill at the top says "Update to ..." when there's a newer one
 $Tick.Start()
+Start-BkStallWatch   # armed by its first heartbeat, once the window is up and running
 if ($script:PollKeys.Count -gt 0) {
     $Keys.Start()
     Say ("Note: another app already uses " + (($script:PollKeys | ForEach-Object { "Ctrl+Alt+" + [char]$_.Vk }) -join ", ") + ". Those still work, but less reliably.")
