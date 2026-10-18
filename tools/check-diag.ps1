@@ -764,6 +764,366 @@ try {
     $sx = @($r.States)
     Check "through Step-BkLog: the start state once, then exactly one line per change (on, mode, minutes, jitter), none for quiet ticks" ($sx.Count -eq 5 -and $sx[0].on -eq $false -and $sx[1].on -eq $true -and $sx[2].mode -eq "quick" -and $sx[3].minutes -eq 15 -and $sx[4].jitter -eq $false) (($sx | ForEach-Object { "$($_.on)/$($_.mode)/$($_.minutes)/$($_.jitter)" }) -join " ")
 
+    # ==== Phase 2d: screens, launches, disconnects, Roblox's tray, tabs, updates, import, multi-window ====
+    # ---- the pure parts ----
+    $acc2d = [pscustomobject]@{ id = "1b4e28ba-2fa1-11d2-883f-0016d3cca427"; nick = $Nick; isMain = $true; profileUrl = "https://www.roblox.com/users/987654321/profile" }
+    $log = New-SecretLog
+    $al = Get-BkAccountAlias $log $acc2d
+    Check "2d alias: an account appears as its per-run alias, made from its id (never its name)" ($al -cmatch '^acc-[0-9a-f]{6}$' -and $al -eq (Get-BkLogAlias $log $acc2d.id)) $al
+    Check "2d alias: no account, an account without an id, or logging off: no alias (the field is left out)" ($null -eq (Get-BkAccountAlias $log $null) -and $null -eq (Get-BkAccountAlias $log ([pscustomobject]@{ nick = $Nick })) -and $null -eq (Get-BkAccountAlias $null $acc2d))
+    $kinds = [ordered]@{
+        "https://www.roblox.com/games/1818/Some-Game" = "game"; "https://www.roblox.com/games/1/x?privateServerLinkCode=PrivCoreCode7777" = "private"
+        "https://www.roblox.com/users/987654321/profile" = "profile"; "https://www.roblox.com/share?code=ShareCoreCode55&type=Server" = "private"
+        "https://www.roblox.com/share?code=abc" = "share"; "https://www.roblox.com/home" = "other"; "" = "other"; "not a link" = "other" }
+    $wrong = @($kinds.Keys | Where-Object { (Get-BkLinkKind $_) -cne $kinds[$_] } | ForEach-Object { "$_ -> $(Get-BkLinkKind $_)" })
+    Check "2d link kind: game, private, profile, share or other, never the link itself" ($wrong.Count -eq 0) ($wrong -join "; ")
+    $codes = [ordered]@{ "267" = "kicked"; "268" = "unexpected"; "273" = "elsewhere"; "277" = "lost"; "278" = "idle"; "279" = "connect"; "288" = "shutdown"; "299" = "other"; "" = "other" }
+    $wrong = @($codes.Keys | Where-Object { (Get-DisconnectReason $_ $false) -cne $codes[$_] } | ForEach-Object { "$_ -> $(Get-DisconnectReason $_ $false)" })
+    Check "2d disconnect reason: Roblox's code becomes a category (unknown codes: other)" ($wrong.Count -eq 0) ($wrong -join "; ")
+    Check "2d disconnect reason: a game's kick message makes it 'kicked', whatever the code (its text is never kept)" ((Get-DisconnectReason "277" $true) -eq "kicked")
+    $log = New-BkLog $Dir (New-FakeDisk); $dg2 = New-BkDiag 3
+    $okRuns = @(1..5 | ForEach-Object { Test-BkDiagBudget $dg2 $log "screen.add" })
+    Check "2d budget: an event gets its quota per run; past it, it's counted as dropped and not written" (($okRuns -join ",") -eq "True,True,True,False,False" -and $log.Dropped -eq 2 -and $log.DropsToReport -eq 2) "$($okRuns -join ',') dropped=$($log.Dropped)"
+    Check "2d budget: each event has its own quota, 200 a run by default" ((Test-BkDiagBudget $dg2 $log "screen.remove") -and (New-BkDiag).Max -eq 200)
+    $mw = New-BkDiag
+    $m1 = Get-MultiWindowEvent $mw $true; $m2 = Get-MultiWindowEvent $mw $true; $m3 = Get-MultiWindowEvent $mw $false; $m4 = Get-MultiWindowEvent $mw $false; $m5 = Get-MultiWindowEvent $mw $true
+    Check "2d multi-window: the first state, then only changes (on, off, on)" ($m1.Fields.state -eq "on" -and $null -eq $m2 -and $m3.Fields.state -eq "off" -and $null -eq $m4 -and $m5.Fields.state -eq "on" -and $m1.Ev -eq "multiwindow")
+    # tab outcomes: every verdict and skip has a code from the schema's list (the words shown stay as they were)
+    $t0 = [DateTime]"2026-10-18T12:00:00"
+    function TOp2([int]$age, [long]$hwnd = 0, [bool]$cancelled = $false) { [pscustomobject]@{ Start = $t0.AddSeconds(-$age); Hwnd = $hwnd; Cancelled = $cancelled } }
+    $verdicts = @(
+        ,@((TOp2 5), "", "connected", "wait", "")
+        ,@($null, "", "connected", "unknown", "unknown")
+        ,@((TOp2 5), "", "off", "keep", "off")
+        ,@((TOp2 5 0 $true), "", "connected", "keep", "cancelled")
+        ,@((TOp2 400), "", "connected", "keep", "nowindow")
+        ,@((TOp2 5 77), "", "connected", "keep", "closed")
+        ,@((TOp2 5 77), "loading", "window", "close", "window")
+        ,@((TOp2 5 77), "connected", "connected", "close", "connected")
+        ,@((TOp2 400 77), "joining", "connected", "keep", "timeout")
+        ,@((TOp2 5 77), "unknown", "connected", "keep", "nolog")
+        ,@((TOp2 5 77), "left", "connected", "keep", "left"))
+    $wrong = @(foreach ($v in $verdicts) { $r = Get-TabVerdict $v[0] $v[1] $t0 $v[2] 360; if ($r.State -ne $v[3] -or ("" + $r.Code) -ne $v[4]) { "$($v[3])/$($v[4]) got $($r.State)/$($r.Code)" } })
+    Check "2d tab verdicts: each outcome carries its reason code (wait has none)" ($wrong.Count -eq 0) ($wrong -join "; ")
+    $tabEnum = $BkLogSchema["tab.report"].Fields["reason"].Substring(5) -split '\|'
+    Check "2d tab verdicts: every code is one the log accepts" (@($verdicts | ForEach-Object { $_[4] } | Where-Object { $_ -and $tabEnum -cnotcontains $_ }).Count -eq 0)
+    $skips = @(@("off", @{ Helper = "on"; HelperVersion = "2.2" }, "off"), @("connected", @{ Helper = "missing"; HelperVersion = "" }, "nohelper"), @("connected", @{ Helper = "on"; HelperVersion = "2.1" }, "oldhelper"), @("connected", @{ Helper = "on"; HelperVersion = "2.2" }, ""))
+    $wrong = @(foreach ($k in $skips) { $r = Get-TabSkip $k[0] $k[1]; if (("" + $r.Code) -ne $k[2] -or $r.Why -ne (Get-TabSkipReason $k[0] $k[1])) { "$($k[2]) got $($r.Code)" } })
+    Check "2d tab skips: off, no helper or an old helper each have a code, and the words are Get-TabSkipReason's" ($wrong.Count -eq 0 -and $tabEnum -ccontains "noport" -and $tabEnum -ccontains "nocontact") ($wrong -join "; ")
+    $sx = New-Session $t0
+    [void](Update-Session $sx (Read-LogEvent "2026-10-18T04:00:01.000Z,1.0,1a2b,6 [FLog::Network] Disconnected from server for reason: Lost connection to the game server, please reconnect (Error Code: 277)") $t0)
+    Check "2d session: a disconnect keeps Roblox's code next to its words" ($sx.State -eq "disconnected" -and $sx.Code -eq "277") "state=$($sx.State) code=$($sx.Code)"
+    [void](Update-Session $sx (Read-LogEvent "2026-10-18T04:00:09.000Z,1.0,1a2b,6 ! Joining game '11111111-2222-3333-4444-555555555555' place 1818 at 10.0.0.1") $t0)
+    Check "2d session: joining again clears the code" ($sx.Code -eq "") "code=$($sx.Code)"
+    $err = $null
+    try {
+        [void](Get-BkLinkKind $null); [void](Get-DisconnectReason $null $false); [void](Test-BkDiagBudget $null $null "x"); [void](Get-MultiWindowEvent $null $true)
+        [void](Get-ScreenFields $null $null $null 0 ([DateTime]::Now)); [void](Get-DisconnectFields $null $null "log" $null $false)
+    } catch { $err = $_ }
+    Check "2d helpers with missing inputs: nothing thrown" ($null -eq $err) "$err"
+
+    # ---- the real hooks, taken from BloxKit.ps1 by name, run against stand-ins ----
+    # (RbxCore, BkBox and WPF's file dialog aren't loaded in -TestOnly, so these stand in for them.)
+    Add-Type -TypeDefinition @'
+using System; using System.Collections.Generic;
+public static class RbxCore {
+    public static List<IntPtr> Windows = new List<IntPtr>(); public static List<IntPtr> Closed = new List<IntPtr>();
+    public static IntPtr Foreground = IntPtr.Zero; public static double Score = -1;
+    public static IntPtr[] FindRobloxWindows() { return Windows.ToArray(); }
+    public static void RemoveScreen(IntPtr thumb) { }
+    public static void Unminimize(IntPtr h) { }
+    public static int PidOf(IntPtr h) { return Windows.Contains(h) ? 4000 + (int)(h.ToInt64() % 1000) : 0; }
+    public static int SetProcessMute(int pid, bool mute) { return 0; }
+    public static bool IsWindow(IntPtr h) { return Windows.Contains(h); }
+    public static void CloseWindow(IntPtr h) { Closed.Add(h); }
+    public static IntPtr GetForegroundWindow() { return Foreground; }
+    public static double DialogScore(IntPtr h) { return Score; }
+}
+public static class BkBox { public static string Answer = "Yes"; public static string Show(string a, string b, string c, string d) { return Answer; } }
+namespace Microsoft.Win32 { public class OpenFileDialog { public static bool Pick = true; public string Filter = ""; public string FileName = "backup.json"; public bool? ShowDialog(object owner) { return Pick; } } }
+'@
+    $names2d = @("Write-BkDiag", "Write-ScreenDiag", "Refresh-Windows", "Claim-Window", "Raise-Alert", "Find-Account", "Same", "Close-ReplacedWindow", "Close-RobloxTray",
+                 "Step-Queue", "Cancel-Queue", "Set-TabReport", "Check-Disconnects", "Watch-Logs", "Read-UpdateCheck", "Start-UpdateCheck", "Start-Update", "Import-Backup", "Step-BkLog", "Label-Of")
+    $nodes2d = @(foreach ($n in $names2d) { $ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq $n }, $true) })
+    $missing2d = @($names2d | Where-Object { $n = $_; -not @($nodes2d | Where-Object { $_ -and $_.Name -eq $n }).Count })
+    Check "2d hook check: all $($names2d.Count) hooked functions are in BloxKit.ps1" ($missing2d.Count -eq 0) ("missing: " + ($missing2d -join ", "))
+    $hook2d = (@($nodes2d | Where-Object { $_ } | ForEach-Object { $_.Extent.Text }) -join "`n")
+    $accMain = [pscustomobject]@{ id = "aaaaaaaa-0000-0000-0000-000000000001"; nick = $Nick; isMain = $true; autoJoin = $true; profileUrl = "https://www.roblox.com/users/987654321/profile"; lastUrl = ""; needsLogin = $false }
+    $accAlt = [pscustomobject]@{ id = "aaaaaaaa-0000-0000-0000-000000000002"; nick = "Zqxalt"; isMain = $false; autoJoin = $false; profileUrl = ""; lastUrl = ""; needsLogin = $false }
+    $env2d = {
+        $script:BkLog = New-BkLog $Dir (New-FakeDisk); Set-BkLogSecrets $script:BkLog @($Nick, "Zqxalt", "https://www.roblox.com/users/987654321/profile"); $script:BkDiag = New-BkDiag
+        $script:State = [pscustomobject]@{ accounts = @($accMain, $accAlt); launchTimeout = 60; mainSettle = 5; launchSettle = 3; tabCloseWhen = "connected"; autoRejoin = $true
+                                           alertSound = $false; discCheck = $true; closeRobloxTray = $true; webhookOnDone = $false; afkMode = "hidden"; afkMinutes = 5; afkActions = @("jump") }
+        foreach ($n in "Wins", "Ops", "Q", "QFailed", "PendingRejoin", "Said") { Set-Variable -Scope Script -Name $n -Value (New-Object System.Collections.ArrayList) }
+        $script:ExpectedClose = New-Object System.Collections.Generic.HashSet[long]; $script:ReplacedClose = New-Object System.Collections.Generic.HashSet[long]
+        $script:SessionRestore = @{}; $script:RejoinLog = @{}; $script:Planned = @{}; $script:LastServer = @{}; $script:ProcStarts = @{}
+        $script:QBusy = $false; $script:QCur = $null; $script:QPhase = "idle"; $script:QDone = 0; $script:QTotal = 0; $script:QLoaded = 0; $script:TabPort = 0; $script:Playing = [IntPtr]::Zero
+        $script:Locks = @(); $script:AfkDiag = New-AfkDiag; $script:AfkOn = $false; $script:BkErrors = New-BkErrorSweep; $script:BkLogClock = [Diagnostics.Stopwatch]::StartNew()
+        $script:ChromeOk = $true; $script:TabServerOk = $true; $script:TrayPids = @(); $script:LogFeed = @{}; $script:WinClosed = $false; $script:CopyFails = $false; $script:WriteErr = ""; $script:BackupRead = $null
+        $script:NoRoblox = $false; $NoRoblox = $false; $BkVersion = "1.3.0"; $script:UpdTask = $null; $script:UpdManual = $false; $script:UpdNewest = $null; $script:ExitReason = "exit"
+        [RbxCore]::Windows.Clear(); [RbxCore]::Closed.Clear(); [RbxCore]::Score = -1; [RbxCore]::Foreground = [IntPtr]::Zero; [BkBox]::Answer = "Yes"; [Microsoft.Win32.OpenFileDialog]::Pick = $true
+        $ui = @{}; foreach ($n in "RetryBtn", "AlertText", "AlertRejoinBtn", "AlertBar", "TabCloseLast", "ProgressBar", "ProgressText") { $ui[$n] = [pscustomobject]@{ Text = ""; Visibility = ""; Foreground = $null; Value = 0 } }
+        $win = [pscustomobject]@{ IsVisible = $true; WindowState = "Normal"; IsActive = $true } | Add-Member -MemberType ScriptMethod -Name Close -Value { $script:WinClosed = $true } -PassThru
+        $Tray = $null; $RobloxLogDir = $Dir; $ChromeData = ""; $SettingsFile = "settings.json"; $AppDir = "appdir"
+        function Say([string]$m) { [void]$script:Said.Add($m) }
+        foreach ($n in "Render-Accounts", "Apply-Efficiency", "Add-Uptime", "Update-TileInfo", "Update-Progress", "Update-StatusTexts", "Update-UpdateUi", "Show-MascotMoment", "Send-Webhook", "Brush", "Set-AccStatus", "Save-Settings", "Release-Instance", "Update-Buttons") { Set-Item -Path "function:$n" -Value { } }
+        function Build-Wall { $i = 1; foreach ($x in @($script:Wins | Sort-Object @{ e = { -not [bool](Find-Account $_.Nick).isMain } }, Num)) { $x.Num = $i++ } }   # main first, like the real one
+        function Get-ProcStart([IntPtr]$h) { $script:ProcStarts[$h.ToInt64()] }
+        function Get-SpotFor { @(0.5, 0.5) }
+        function Assign-Window([IntPtr]$h, $acc) { foreach ($x in @($script:Wins | Where-Object { $_.Handle -eq $h })) { $x.Nick = $acc.nick; $x.Name = $acc.nick; $x.Since = [DateTime]::Now }; Build-Wall }
+        function Get-SetupFor($a) { @{ Helper = $(if ($a.autoJoin) { "on" } else { "missing" }); HelperVersion = "2.2" } }
+        function Start-TabServer { $script:TabServerOk }
+        function Open-Chrome($acc, [string]$url) { $script:ChromeOk }
+        function Finish-Queue([switch]$Quiet) { $script:QBusy = $false; $script:QPhase = "idle"; $script:QCur = $null }
+        function Get-RobloxTrayPids { $script:TrayPids }
+        function Stop-Process { [CmdletBinding()] param($Id, [switch]$Force) if ($Id -lt 0) { throw "Access is denied" } }
+        function Test-Path { [CmdletBinding()] param($Path, $LiteralPath) $true }
+        function Copy-Item { [CmdletBinding()] param($LiteralPath, $Destination, [switch]$Force) if ($script:CopyFails) { throw "There is not enough space on the disk" } }
+        function Start-Process { [CmdletBinding()] param($FilePath, $ArgumentList, $WindowStyle) }
+        function Read-BackupFile { $script:BackupRead }
+        function Get-ProfileNames { @() }
+        function Write-SettingsFile { $script:WriteErr }
+        function Get-AppCommand { @{ File = "BloxKit.exe"; Args = "" } }
+        function Find-LogFor { "" }
+        function Read-LogLines($w) { $feed = @($script:LogFeed[$w.LogPath]); $script:LogFeed[$w.LogPath] = @(); $feed }   # each window reads only its own log
+        function Join-Path { [CmdletBinding()] param($Path, $ChildPath) "$Path/$ChildPath" }   # ($PSScriptRoot is empty in functions loaded this way)
+        Invoke-Expression $hook2d
+        # a window as Refresh-Windows makes it, already on the list
+        function Add-TestWin([long]$h, [string]$nick = "") { [RbxCore]::Windows.Add([IntPtr]$h); $script:ProcStarts[$h] = [DateTime]::Now.AddHours(-1); Refresh-Windows; $w = @($script:Wins | Where-Object { $_.Handle.ToInt64() -eq $h })[0]; if ($nick) { $w.Nick = $nick; $w.Name = $nick }; $w }
+        function Written { Flush-BkLog $script:BkLog; @(@($script:D.Files.Keys | ForEach-Object { Lines $_ }) | ForEach-Object { Parse $_ }) }
+        function Raw { (@($script:D.Files.Values) -join "`n") }
+    }
+    function Evs($lines, [string]$ev) { @($lines | Where-Object { $_.ev -eq $ev }) }
+    function Test-Private([string]$raw) { @(@(Test-Clean $raw) + @("Zqxalt", "roblox.com", "PrivCoreCode", "987654321", "aaaaaaaa-0000") | Where-Object { $raw.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0 }) }
+    $raws = New-Object System.Collections.ArrayList
+
+    # -- screens: a launch's window and one opened some other way, then nothing new --
+    $r = & {
+        . $env2d
+        $t = [DateTime]::Now
+        $op = [pscustomobject]@{ Id = "op1"; Acc = $accMain; Url = "https://www.roblox.com/games/1818/x"; Start = $t.AddSeconds(-5); Hwnd = [long]0; Cancelled = $false }
+        [void]$script:Ops.Add($op); $script:QBusy = $true; $script:QCur = [pscustomobject]@{ Acc = $accMain; Op = $op; Kind = "main" }
+        [RbxCore]::Windows.Add([IntPtr]7002); [RbxCore]::Windows.Add([IntPtr]7001)
+        $script:ProcStarts[[long]7001] = $t.AddSeconds(-2); $script:ProcStarts[[long]7002] = $t.AddMinutes(-30)
+        Refresh-Windows; $calls = $script:D.Calls
+        Refresh-Windows
+        @{ Lines = @(Written); Calls = $calls; Rejected = $script:BkLog.Rejected; Raw = (Raw); Named = ($script:Wins | Where-Object { $_.Handle.ToInt64() -eq 7001 }).Nick }
+    }
+    [void]$raws.Add($r.Raw)
+    $adds = @(Evs $r.Lines "screen.add")
+    $mine = @($adds | Where-Object { $_.hwnd -eq 7001 })[0]; $other = @($adds | Where-Object { $_.hwnd -eq 7002 })[0]
+    Check "2d screens: two new windows, two screen.add lines, and none when nothing changes" ($adds.Count -eq 2) "$($adds.Count)"
+    Check "2d screens: a launch's window: its final number, handle, process id, the account's alias, main, claimed" ($mine.screen -eq 1 -and $mine.pid -eq 4001 -and $mine.account -cmatch '^acc-[0-9a-f]{6}$' -and $mine.main -eq $true -and $mine.claimed -eq $true -and $null -eq $mine.uptimeSec) ($mine | ConvertTo-Json -Compress)
+    Check "2d screens: a window opened some other way: unnamed (no account field), not claimed" ($other.screen -eq 2 -and $null -eq $other.account -and $other.claimed -eq $false) ($other | ConvertTo-Json -Compress)
+    Check "2d screens: only queued while the screens are refreshed (no disk work), nothing rejected, the window still named as before" ($r.Calls -eq 0 -and $r.Rejected -eq 0 -and $r.Named -eq $Nick) "calls=$($r.Calls) rejected=$($r.Rejected) named=$($r.Named)"
+
+    # -- screens going away: replaced, closed by BloxKit, closed unexpectedly (named and unnamed) --
+    $r = & {
+        . $env2d
+        $wa = Add-TestWin 7101 $Nick; $wb = Add-TestWin 7102 "Zqxalt"; $wc = Add-TestWin 7103 $Nick; $wd = Add-TestWin 7104
+        $wc.Since = [DateTime]::Now.AddSeconds(-90)
+        [void](Written); $script:D.Files.Clear()
+        Close-ReplacedWindow $wa "opened in a new window"
+        [void]$script:ExpectedClose.Add([long]7102)   # BloxKit closed it (Close all, Close window)
+        foreach ($h in 7101, 7102, 7103, 7104) { [void][RbxCore]::Windows.Remove([IntPtr]$h) }
+        Refresh-Windows
+        @{ Lines = @(Written); Raw = (Raw); Expected = $script:ExpectedClose.Count; Replaced = $script:ReplacedClose.Count; Rejoin = $script:PendingRejoin.Count; Rejected = $script:BkLog.Rejected }
+    }
+    [void]$raws.Add($r.Raw)
+    $rm = @(Evs $r.Lines "screen.remove"); $kindOf = @{}; foreach ($x in $rm) { $kindOf[[long]$x.hwnd] = $x.kind }
+    Check "2d screens gone: replaced, expected (BloxKit closed it), closed (named), closed (unnamed)" ($rm.Count -eq 4 -and $kindOf[[long]7101] -eq "replaced" -and $kindOf[[long]7102] -eq "expected" -and $kindOf[[long]7103] -eq "closed" -and $kindOf[[long]7104] -eq "closed") (($rm | ForEach-Object { "$($_.hwnd)=$($_.kind)" }) -join ",")
+    $c3 = @($rm | Where-Object { $_.hwnd -eq 7103 })[0]
+    Check "2d screens gone: how long it was up, whose it was; the same windows as before still raise their alert" ($c3.uptimeSec -ge 89 -and $c3.account -cmatch '^acc-' -and $r.Rejoin -eq 1 -and $r.Expected -eq 0 -and $r.Replaced -eq 0 -and $r.Rejected -eq 0) "up=$($c3.uptimeSec) rejoin=$($r.Rejoin) expected=$($r.Expected) replaced=$($r.Replaced) rejected=$($r.Rejected)"
+    $order = @($r.Lines | ForEach-Object { if ($_.ev -eq "screen.remove") { "remove:$($_.hwnd)" } elseif ($_.ev -eq "roblox.disconnect") { "disconnect" } })
+    $dc = @(Evs $r.Lines "roblox.disconnect")
+    Check "2d screens gone: only the named, unexpected one is a disconnect (source window, reason closed, auto-rejoin), written after its screen.remove" ($dc.Count -eq 1 -and $dc[0].source -eq "window" -and $dc[0].reason -eq "closed" -and $dc[0].autoRejoin -eq $true -and $null -eq $dc[0].code -and [array]::IndexOf($order, "disconnect") -eq [array]::IndexOf($order, "remove:7103") + 1) ($order -join ",")
+
+    # -- disconnects from Roblox's own log: code and category, the kick text never --
+    $r = & {
+        . $env2d
+        $w = Add-TestWin 7201 $Nick; $w.LogPath = "x"
+        $script:LogFeed.x = @("2026-10-18T04:00:00.000Z,1.0,1a2b,6 [FLog::Network] Server Kick Message: $Nick was banned by PrivCoreCode7777",
+                            "2026-10-18T04:00:01.000Z,1.0,1a2b,6 [FLog::Network] Disconnected from server for reason: Lost connection to the game server (Error Code: 277)")
+        Watch-Logs; $early = @(Evs @(Written) "roblox.disconnect").Count
+        $w.Sess.ChangedAt = [DateTime]::Now.AddSeconds(-10); Watch-Logs; Watch-Logs
+        $w2 = Add-TestWin 7202 "Zqxalt"; $w2.LogPath = "y"
+        $script:LogFeed.y = @("2026-10-18T04:00:01.000Z,1.0,1a2b,6 [FLog::Network] Disconnected from server for reason: Kicked for being idle (Error Code: 278)")
+        Watch-Logs; $w2.Sess.ChangedAt = [DateTime]::Now.AddSeconds(-10); Watch-Logs
+        $w3 = Add-TestWin 7203 $Nick; $w3.LogPath = "z"
+        $script:LogFeed.z = @("2026-10-18T04:00:01.000Z,1.0,1a2b,6 [FLog::Network] Disconnected from server for reason: Same account joined from another device (Error Code: 273)")
+        Watch-Logs
+        @{ Lines = @(Written); Raw = (Raw); Early = $early; Closed = [RbxCore]::Closed.Contains([IntPtr]7203); Flag = $w.DiscFlag }
+    }
+    [void]$raws.Add($r.Raw)
+    $dc = @(Evs $r.Lines "roblox.disconnect")
+    Check "2d disconnect (log): not before the app's own 8-second wait, and once, not again on the next look" ($r.Early -eq 0 -and @($dc | Where-Object { $_.code -eq 277 }).Count -eq 1 -and $r.Flag) (($dc | ForEach-Object { "$($_.code)/$($_.reason)" }) -join ",")
+    $k = @($dc | Where-Object { $_.code -eq 277 })[0]; $idle = @($dc | Where-Object { $_.code -eq 278 })[0]; $else = @($dc | Where-Object { $_.code -eq 273 })[0]
+    Check "2d disconnect (log): a game's kick message makes it 'kicked' (even with code 277), an idle kick 'idle', both from the log, with auto-rejoin as it happened" ($k.reason -eq "kicked" -and $k.source -eq "log" -and $k.autoRejoin -eq $true -and $idle.reason -eq "idle" -and $idle.source -eq "log") (($dc | ConvertTo-Json -Compress))
+    Check "2d disconnect (log): joined from another device is 'elsewhere' (no auto-rejoin) and its window is still closed as before" ($else.reason -eq "elsewhere" -and $else.autoRejoin -eq $false -and $r.Closed) ($else | ConvertTo-Json -Compress)
+
+    # -- a box that looks like Roblox's 'Disconnected' one: logged as a guess (source dialog) --
+    $r = & {
+        . $env2d
+        $w = Add-TestWin 7301 "Zqxalt"; [void](Written); $script:D.Files.Clear()
+        [RbxCore]::Score = 0.9; Check-Disconnects; $one = @(Evs @(Written) "roblox.disconnect").Count; Check-Disconnects; Check-Disconnects
+        @{ Lines = @(Written); Raw = (Raw); One = $one }
+    }
+    [void]$raws.Add($r.Raw)
+    $dc = @(Evs $r.Lines "roblox.disconnect")
+    Check "2d disconnect (box): after the app's two looks, once, source dialog, reason other, no code" ($r.One -eq 0 -and $dc.Count -eq 1 -and $dc[0].source -eq "dialog" -and $dc[0].reason -eq "other" -and $null -eq $dc[0].code -and $dc[0].account -cmatch '^acc-') "first look: $($r.One); $($dc | ConvertTo-Json -Compress)"
+
+    # -- launches --
+    $r = & {
+        . $env2d
+        $privUrl = "https://www.roblox.com/games/1/x?privateServerLinkCode=PrivCoreCode7777"
+        [void]$script:Q.Add([pscustomobject]@{ Acc = $accMain; Url = $privUrl; Kind = "main" }); $script:QBusy = $true; $script:QTotal = 1
+        $script:TabServerOk = $false
+        Step-Queue; $phase = $script:QPhase; $calls = $script:D.Calls
+        $script:QCur.Op.Hwnd = 7401; $script:QStart = [DateTime]::Now.AddSeconds(-12); Step-Queue; $phase2 = $script:QPhase
+        $script:QPhase = "idle"; [void]$script:Q.Add([pscustomobject]@{ Acc = $accAlt; Url = "https://www.roblox.com/games/1818/x"; Kind = "normal" }); Step-Queue
+        $script:QStart = [DateTime]::Now.AddSeconds(-61); Step-Queue; $phase3 = $script:QPhase
+        @{ Lines = @(Written); Raw = (Raw); Phase = $phase; Phase2 = $phase2; Phase3 = $phase3; Calls = $calls; Failed = $script:QFailed.Count; Rejected = $script:BkLog.Rejected }
+    }
+    [void]$raws.Add($r.Raw)
+    $st = @(Evs $r.Lines "launch.start"); $wi = @(Evs $r.Lines "launch.window"); $to = @(Evs $r.Lines "launch.timeout")
+    Check "2d launch.start: once Chrome was asked to open it: alias, main, link kind (never the link), helper" ($st.Count -eq 2 -and $st[0].account -cmatch '^acc-' -and $st[0].main -eq $true -and $st[0].link -eq "private" -and $st[0].helper -eq $true -and $st[1].main -eq $false -and $st[1].link -eq "game" -and $st[1].helper -eq $false) ($st | ConvertTo-Json -Compress)
+    Check "2d launch.window: only when its Roblox window was matched to it, with the wait" ($wi.Count -eq 1 -and $wi[0].waitSec -ge 11 -and $wi[0].account -eq $st[0].account) ($wi | ConvertTo-Json -Compress)
+    Check "2d launch.timeout: no window in time: alias, main, the wait; the queue moves on as before" ($to.Count -eq 1 -and $to[0].account -eq $st[1].account -and $to[0].main -eq $false -and $to[0].waitSec -ge 60 -and $r.Phase -eq "wait" -and $r.Phase2 -eq "settle" -and $r.Phase3 -eq "idle" -and $r.Failed -eq 1) "phases $($r.Phase)/$($r.Phase2)/$($r.Phase3) failed=$($r.Failed) $($to | ConvertTo-Json -Compress)"
+    $tr = @(Evs $r.Lines "tab.report")
+    Check "2d tab.report: a launch whose tab can't be closed (no local port): kept, noport" ($tr.Count -ge 1 -and $tr[0].outcome -eq "kept" -and $tr[0].reason -eq "noport") ($tr | ConvertTo-Json -Compress)
+    Check "2d launches: only queued while the queue steps (no disk work), nothing rejected" ($r.Calls -eq 0 -and $r.Rejected -eq 0) "calls=$($r.Calls) rejected=$($r.Rejected)"
+    $order = @($r.Lines | Where-Object { $_.ev -like "launch.*" } | ForEach-Object { $_.ev })
+    Check "2d launches: in the order they happened" (($order -join ",") -eq "launch.start,launch.window,launch.start,launch.timeout") ($order -join ",")
+
+    $r = & {
+        . $env2d
+        [void]$script:Q.Add([pscustomobject]@{ Acc = $accMain; Url = "https://www.roblox.com/games/1818/x"; Kind = "main" }); [void]$script:Q.Add([pscustomobject]@{ Acc = $accAlt; Url = "https://www.roblox.com/games/1818/x"; Kind = "normal" })
+        $script:QBusy = $true; $script:ChromeOk = $false
+        Step-Queue; $afterChrome = $script:QBusy
+        $script:ChromeOk = $true; $script:QBusy = $true; $script:QPhase = "idle"
+        [void]$script:Q.Add([pscustomobject]@{ Acc = $accAlt; Url = "https://www.roblox.com/games/1818/x"; Kind = "normal" }); [void]$script:Q.Add([pscustomobject]@{ Acc = $accMain; Url = "https://www.roblox.com/games/1818/x"; Kind = "normal" })
+        Step-Queue; Cancel-Queue
+        $op = [pscustomobject]@{ Id = "late"; Acc = $accAlt; Url = "https://www.roblox.com/games/1818/x"; Start = [DateTime]::Now.AddSeconds(-75); Hwnd = [long]7501; Cancelled = $false }
+        $w = Add-TestWin 7501; Claim-Window ([IntPtr]7501) $op
+        $op2 = [pscustomobject]@{ Id = "now"; Acc = $accMain; Url = "https://www.roblox.com/games/1818/x"; Start = [DateTime]::Now.AddSeconds(-3); Hwnd = [long]7502; Cancelled = $false }
+        $script:QCur = [pscustomobject]@{ Acc = $accMain; Op = $op2 }; $w2 = Add-TestWin 7502; Claim-Window ([IntPtr]7502) $op2
+        @{ Lines = @(Written); Raw = (Raw); AfterChrome = $afterChrome; Said = ($script:Said -join " | ") }
+    }
+    [void]$raws.Add($r.Raw)
+    $cn = @(Evs $r.Lines "launch.cancel"); $lt = @(Evs $r.Lines "launch.late")
+    Check "2d launch.cancel: Chrome couldn't open it: why chrome, with what was left (and no launch.start for it)" ($cn.Count -eq 2 -and $cn[0].why -eq "chrome" -and $cn[0].pending -eq 2 -and @(Evs $r.Lines "launch.start").Count -eq 1 -and $r.AfterChrome -eq $false) ($cn | ConvertTo-Json -Compress)
+    Check "2d launch.cancel: Stop: why user, with the one opening and the one waiting" ($cn[1].why -eq "user" -and $cn[1].pending -eq 2) ($cn | ConvertTo-Json -Compress)
+    Check "2d launch.late: a window from a launch that had given up: alias and how long after the launch; the current launch's own window isn't late" ($lt.Count -eq 1 -and $lt[0].waitSec -ge 74 -and $lt[0].account -cmatch '^acc-' -and $r.Said -match 'showed up late') ($lt | ConvertTo-Json -Compress)
+
+    # -- the tab's other outcomes, and every place that reports one passes an outcome and a code --
+    $r = & { . $env2d; Set-TabReport $Nick "closed" "It's in a game." "closed" "connected"; Set-TabReport $Nick "not asked about yet" "x" "notasked" "nocontact"; Set-TabReport $Nick "kept open" "x" "kept" ""; @{ Lines = @(Written); Raw = (Raw); Text = $ui.TabCloseLast.Text } }
+    [void]$raws.Add($r.Raw)
+    $tr = @(Evs $r.Lines "tab.report")
+    Check "2d tab.report: closed/connected, notasked/nocontact, and a missing code is 'other'; what's shown is unchanged" ($tr.Count -eq 3 -and $tr[0].outcome -eq "closed" -and $tr[0].reason -eq "connected" -and $tr[1].outcome -eq "notasked" -and $tr[1].reason -eq "nocontact" -and $tr[2].reason -eq "other" -and $r.Text -match "^Last launch tab \($Nick, ") ($tr | ConvertTo-Json -Compress)
+    $calls = @($ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.CommandAst] -and $x.GetCommandName() -eq "Set-TabReport" }, $true))
+    $short = @($calls | Where-Object { $_.CommandElements.Count -ne 6 } | ForEach-Object { "line $($_.Extent.StartLineNumber)" })
+    Check "2d tab.report: all $($calls.Count) places that report a tab pass an outcome and a reason code" ($calls.Count -eq 3 -and $short.Count -eq 0) ($short -join ", ")
+
+    # -- Roblox's tray copies --
+    $r = & {
+        . $env2d
+        $script:TrayPids = @(11, 12, -1); Close-RobloxTray
+        $script:TrayPids = @(); Close-RobloxTray
+        $script:TrayPids = @(13); $script:QBusy = $true; Close-RobloxTray
+        @{ Lines = @(Written); Raw = (Raw); Said = $script:Said.Count }
+    }
+    $tc = @(Evs $r.Lines "roblox.trayclosed")
+    Check "2d roblox.trayclosed: how many were really closed (one refused), none when there were none or while accounts open" ($tc.Count -eq 1 -and $tc[0].count -eq 2 -and $r.Said -eq 1) ($tc | ConvertTo-Json -Compress)
+
+    # -- update checks and updating --
+    function New-Answer([bool]$ok, [int]$status, [string]$body) { [pscustomobject]@{ IsSuccessStatusCode = $ok; StatusCode = $status; Content = ([pscustomobject]@{ B = $body } | Add-Member -MemberType ScriptMethod -Name ReadAsStringAsync -Value { [pscustomobject]@{ Result = $this.B } } -PassThru) } }
+    function New-Task($answer, [bool]$faulted = $false, [bool]$canceled = $false, $ex = $null) { [pscustomobject]@{ IsCompleted = $true; IsFaulted = $faulted; IsCanceled = $canceled; Result = $answer; Exception = $ex } }
+    $r = & {
+        . $env2d
+        $script:UpdTask = New-Task (New-Answer $true 206 '$BkVersion = "1.4.0"   # shown in Settings'); Read-UpdateCheck; $state1 = $script:UpdState
+        $script:UpdTask = New-Task (New-Answer $true 206 '$BkVersion = "1.3.0"'); Read-UpdateCheck
+        $script:UpdTask = New-Task (New-Answer $false 404 ""); Read-UpdateCheck
+        $script:UpdTask = New-Task $null $true $false (New-Object AggregateException (New-Object System.Net.WebException "The remote name could not be resolved: 'raw.githubusercontent.com' for $Nick")); Read-UpdateCheck
+        $script:UpdTask = New-Task $null $false $true; Read-UpdateCheck
+        $script:UpdTask = $null; Read-UpdateCheck
+        function Add-Type { throw "no network here" }; Start-UpdateCheck
+        @{ Lines = @(Written); Raw = (Raw); State1 = $state1 }
+    }
+    [void]$raws.Add($r.Raw)
+    $uc = @(Evs $r.Lines "update.check")
+    Check "2d update.check: available and latest, with both versions" ($uc.Count -eq 6 -and $uc[0].result -eq "available" -and $uc[0].current -eq "1.3.0" -and $uc[0].newest -eq "1.4.0" -and $uc[1].result -eq "latest" -and $r.State1 -eq "available") (($uc | ForEach-Object { "$($_.result)/$($_.newest)/$($_.errorType)" }) -join ",")
+    Check "2d update.check failed: the HTTP status, the error's type (never its message), a timeout, and a check that couldn't start" ($uc[2].errorType -eq "http-404" -and $uc[3].errorType -eq "System.Net.WebException" -and $uc[4].errorType -eq "timed-out" -and $uc[5].result -eq "failed" -and $uc[5].errorType -match '\.') (($uc | ForEach-Object { "$($_.result)/$($_.errorType)" }) -join ",")
+    $r = & {
+        . $env2d
+        $script:UpdNewest = [version]"1.4.0"; [BkBox]::Answer = "No"; Start-Update; $no = @(Evs @(Written) "update.start").Count
+        [BkBox]::Answer = "Yes"; Start-Update
+        @{ Lines = @(Written); No = $no; Reason = $script:ExitReason; Closed = $script:WinClosed }
+    }
+    $us = @(Evs $r.Lines "update.start")
+    Check "2d update.start: only once you said yes: from and to; BloxKit still closes for the update" ($r.No -eq 0 -and $us.Count -eq 1 -and $us[0].from -eq "1.3.0" -and $us[0].to -eq "1.4.0" -and $r.Reason -eq "update" -and $r.Closed) ($us | ConvertTo-Json -Compress)
+
+    # -- loading a backup --
+    $r = & {
+        . $env2d
+        $good = @{ Ok = $true; State = [pscustomobject]@{ accounts = @($accMain, $accAlt) }; NeedSignIn = @(); Warnings = @() }
+        [Microsoft.Win32.OpenFileDialog]::Pick = $false; Import-Backup
+        [Microsoft.Win32.OpenFileDialog]::Pick = $true; $script:BackupRead = @{ Ok = $false; Error = "C:\Users\zqxuser\backup.json can't be read for $Nick" }; Import-Backup
+        $script:BackupRead = $good; [BkBox]::Answer = "No"; Import-Backup
+        [BkBox]::Answer = "Yes"; $script:CopyFails = $true; Import-Backup
+        $script:CopyFails = $false; $script:WriteErr = "Access to the path 'C:\Users\zqxuser\settings.json' is denied."; Import-Backup
+        $closedEarly = $script:WinClosed
+        $script:WriteErr = ""; Import-Backup
+        @{ Lines = @(Written); Raw = (Raw); Reason = $script:ExitReason; Closed = $script:WinClosed; Early = $closedEarly }
+    }
+    [void]$raws.Add($r.Raw)
+    $bi = @(Evs $r.Lines "backup.import")
+    Check "2d backup.import: unreadable, no copy kept, not saved, then restart with the account count (nothing for a cancel)" ((($bi | ForEach-Object { $_.result }) -join ",") -eq "unreadable,nocopy,notsaved,restart" -and $bi[3].accounts -eq 2 -and $null -eq $bi[0].accounts) (($bi | ForEach-Object { "$($_.result)/$($_.accounts)" }) -join ",")
+    Check "2d backup.import: BloxKit still restarts only after a good load" ($r.Reason -eq "import" -and $r.Closed -and -not $r.Early)
+
+    # -- multi-window, from the locks, once a second (wherever they were taken) --
+    $r = & {
+        . $env2d
+        Step-BkLog; Step-BkLog; $script:Locks = @("lock"); Step-BkLog; Step-BkLog; $script:Locks = @(); Step-BkLog
+        $NoRoblox = $true; $script:Locks = @("lock"); Step-BkLog
+        @{ Lines = @(Written) }
+    }
+    $mws = @(Evs $r.Lines "multiwindow")
+    Check "2d multiwindow: the first state, then each change (off, on, off), none in test mode" ((($mws | ForEach-Object { $_.state }) -join ",") -eq "off,on,off") (($mws | ForEach-Object { $_.state }) -join ",")
+
+    # -- the budget through the real Write-BkDiag --
+    $r = & { . $env2d; for ($i = 1; $i -le 205; $i++) { Write-BkDiag "roblox.trayclosed" @{ count = $i } }; @{ Lines = @(Written); Dropped = $script:BkLog.Dropped } }
+    Check "2d budget: 205 of one event in a run: 200 written, 5 counted as dropped (and reported)" (@(Evs $r.Lines "roblox.trayclosed").Count -eq 200 -and $r.Dropped -eq 5 -and @(Evs $r.Lines "log.dropped" | Where-Object { $_.count -eq 5 }).Count -eq 1) "dropped=$($r.Dropped)"
+
+    # -- logging off, or the log breaking: the app does exactly what it did --
+    $r = & {
+        . $env2d
+        $script:BkLog = $null; $err = $null
+        try {
+            $w = Add-TestWin 7601 $Nick; Close-ReplacedWindow $w "x"; [void][RbxCore]::Windows.Remove([IntPtr]7601); Refresh-Windows
+            [void]$script:Q.Add([pscustomobject]@{ Acc = $accAlt; Url = "https://www.roblox.com/games/1818/x"; Kind = "normal" }); $script:QBusy = $true; Step-Queue; Cancel-Queue
+            $script:TrayPids = @(1); Close-RobloxTray; Set-TabReport $Nick "closed" "x" "closed" "window"
+            $script:UpdTask = New-Task (New-Answer $false 500 ""); Read-UpdateCheck; Step-BkLog
+        } catch { $err = $_ }
+        @{ Err = $err; Rejoin = $script:PendingRejoin.Count; Busy = $script:QBusy; Marks = $script:ReplacedClose.Count + $script:ExpectedClose.Count }
+    }
+    Check "2d logging off: every hook runs as before (a replaced window: no alert, nothing left marked), nothing thrown" ($null -eq $r.Err -and $r.Rejoin -eq 0 -and $r.Marks -eq 0 -and $r.Busy -eq $false) "$($r.Err) rejoin=$($r.Rejoin) marks=$($r.Marks)"
+    $r = & {
+        . $env2d
+        function Write-BkLog { throw "the log broke" }; function Get-BkLogAlias { throw "no alias" }; function Get-ScreenFields { throw "screen fields broke" }; $err = $null
+        try {
+            $w = Add-TestWin 7701 $Nick; [void][RbxCore]::Windows.Remove([IntPtr]7701); Refresh-Windows
+            [void]$script:Q.Add([pscustomobject]@{ Acc = $accAlt; Url = "https://www.roblox.com/games/1818/x"; Kind = "normal" }); $script:QBusy = $true; Step-Queue; Cancel-Queue
+            $script:TrayPids = @(1); Close-RobloxTray; Set-TabReport $Nick "closed" "x" "closed" "window"
+            $script:UpdTask = New-Task (New-Answer $false 500 ""); Read-UpdateCheck; $script:UpdNewest = [version]"1.4.0"; Start-Update
+        } catch { $err = $_ }
+        @{ Err = $err; Rejoin = $script:PendingRejoin.Count; Busy = $script:QBusy; Reason = $script:ExitReason }
+    }
+    Check "2d the log failing inside a hook: nothing thrown into the app, which carries on (alert, queue, update)" ($null -eq $r.Err -and $r.Rejoin -eq 1 -and $r.Busy -eq $false -and $r.Reason -eq "update") "$($r.Err)"
+
+    # -- nothing private in anything these wrote --
+    $leak = @(foreach ($raw in $raws) { Test-Private $raw })
+    Check "2d privacy: across every scenario above, no name, link, user id, private code, kick text, account id or path was written" ($leak.Count -eq 0 -and $raws.Count -ge 8) ("leaked: " + (($leak | Select-Object -Unique) -join ","))
+
     # ---- the real disk, in a temp folder ----
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("bk-diag-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
     try {

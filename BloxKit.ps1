@@ -517,16 +517,16 @@ function Read-LogEvent([string]$line) {
 function New-Session([DateTime]$now) {
     # What one Roblox window is doing, according to its log.
     # loading -> joining (join line) -> connected (server accepted it) -> disconnected | left
-    @{ State = "loading"; Job = ""; Place = ""; Reason = ""; KickMsg = ""; ChangedAt = $now }
+    @{ State = "loading"; Job = ""; Place = ""; Reason = ""; Code = ""; KickMsg = ""; ChangedAt = $now }   # Code: Roblox's disconnect code, for the log
 }
 
 function Update-Session($s, $e, [DateTime]$now) {
     # Applies one log event. Returns $true when the state changed.
     $before = $s.State
     switch ($e.Kind) {
-        "join"      { $s.State = "joining"; $s.Job = $e.Job; $s.Place = $e.Place; $s.Reason = ""; $s.KickMsg = "" }
-        "handoff"   { $s.State = "loading"; $s.Reason = ""; $s.KickMsg = "" }   # a new launch starts in this window
-        "teleport"  { $s.State = "joining"; $s.Reason = "" }
+        "join"      { $s.State = "joining"; $s.Job = $e.Job; $s.Place = $e.Place; $s.Reason = ""; $s.Code = ""; $s.KickMsg = "" }
+        "handoff"   { $s.State = "loading"; $s.Reason = ""; $s.Code = ""; $s.KickMsg = "" }   # a new launch starts in this window
+        "teleport"  { $s.State = "joining"; $s.Reason = ""; $s.Code = "" }
         "connected" { if ($s.State -eq "joining") { $s.State = "connected" } }   # a process alone is never "connected"
         "left"      { $s.State = "left" }
         "kickmsg"   {
@@ -534,7 +534,7 @@ function Update-Session($s, $e, [DateTime]$now) {
             if ($s.State -eq "disconnected") { $s.Reason = "kicked by the game: $($e.Text)" }
         }
         "disc"      {
-            $s.State = "disconnected"
+            $s.State = "disconnected"; $s.Code = "" + $e.Code
             $s.Reason = $(if ($s.KickMsg) { "kicked by the game: $($s.KickMsg)" } else { $e.Text })
         }
     }
@@ -1266,39 +1266,40 @@ function Test-HelperCanCloseTabs([string]$version) {
 # its tab worked: GET http://127.0.0.1:<port>/launch/<id>?v=<helper version>
 # Answers: wait | close | keep | unknown. Only "close" closes that one tab.
 function Get-TabVerdict($op, [string]$winState, [DateTime]$now, [string]$closeWhen, [int]$maxAgeSec) {
-    # -> @{ State = wait | close | keep | unknown; Why = what to tell you about it }
+    # -> @{ State = wait | close | keep | unknown; Why = what to tell you about it; Code = the same, for the log }
     # winState: what the launch's Roblox window is doing ("" = no window, or it closed again)
-    $v = { param($s, $w) @{ State = $s; Why = $w } }
-    if (-not $op) { return & $v "unknown" "BloxKit doesn't know this launch (the app was restarted since)." }
-    if ($closeWhen -notin @("window", "connected")) { return & $v "keep" "Tab closing is off (Settings > Opening accounts)." }
-    if ($op.Cancelled) { return & $v "keep" "The launch was cancelled." }
+    $v = { param($s, $w, $c = "") @{ State = $s; Why = $w; Code = $c } }
+    if (-not $op) { return & $v "unknown" "BloxKit doesn't know this launch (the app was restarted since)." "unknown" }
+    if ($closeWhen -notin @("window", "connected")) { return & $v "keep" "Tab closing is off (Settings > Opening accounts)." "off" }
+    if ($op.Cancelled) { return & $v "keep" "The launch was cancelled." "cancelled" }
     $tooOld = ($now - $op.Start).TotalSeconds -gt $maxAgeSec
     if ($op.Hwnd -eq 0) {   # Roblox hasn't opened (yet)
-        if ($tooOld) { return & $v "keep" "No Roblox window appeared for this launch." }
+        if ($tooOld) { return & $v "keep" "No Roblox window appeared for this launch." "nowindow" }
         return & $v "wait" "Waiting for its Roblox window."
     }
-    if (-not $winState) { return & $v "keep" "Its Roblox window closed again." }
-    if ($closeWhen -eq "window") { return & $v "close" "Its Roblox window opened." }
+    if (-not $winState) { return & $v "keep" "Its Roblox window closed again." "closed" }
+    if ($closeWhen -eq "window") { return & $v "close" "Its Roblox window opened." "window" }
     switch ($winState) {
-        "connected" { return & $v "close" "It's in a game (Roblox's log confirms it)." }
+        "connected" { return & $v "close" "It's in a game (Roblox's log confirms it)." "connected" }
         { $_ -in @("loading", "joining", "disconnected") } {   # disconnected may be a teleport
-            if ($tooOld) { return & $v "keep" "It didn't get into a game in time (still $winState)." }
+            if ($tooOld) { return & $v "keep" "It didn't get into a game in time (still $winState)." "timeout" }
             return & $v "wait" "Waiting until it's in a game ($winState)."
         }
-        "unknown" { return & $v "keep" "Its Roblox log wasn't found, so being in a game can't be confirmed. ('When Roblox opens' doesn't need the log.)" }
-        default   { return & $v "keep" "It left the game before it was confirmed." }
+        "unknown" { return & $v "keep" "Its Roblox log wasn't found, so being in a game can't be confirmed. ('When Roblox opens' doesn't need the log.)" "nolog" }
+        default   { return & $v "keep" "It left the game before it was confirmed." "left" }
     }
 }
 function Get-TabAnswer($op, [string]$winState, [DateTime]$now, [string]$closeWhen, [int]$maxAgeSec) {
     return (Get-TabVerdict $op $winState $now $closeWhen $maxAgeSec).State
 }
-function Get-TabSkipReason([string]$closeWhen, $setup) {
-    # Why a launch doesn't get a tab-closing id at all ("" = it does).
-    if ($closeWhen -notin @("window", "connected")) { return "Tab closing is off (Settings > Opening accounts)." }
-    if (@("on", "elsewhere") -notcontains $setup.Helper) { return "The helper isn't installed or isn't on in this Chrome profile (Settings > Chrome setup)." }
-    if (-not (Test-HelperCanCloseTabs $setup.HelperVersion)) { return "The helper in this Chrome profile is older than 2.2: on chrome://extensions, click its round reload arrow." }
-    return ""
+function Get-TabSkip([string]$closeWhen, $setup) {
+    # Why a launch doesn't get a tab-closing id at all: @{ Code (for the log); Why } ("" = it does).
+    if ($closeWhen -notin @("window", "connected")) { return @{ Code = "off"; Why = "Tab closing is off (Settings > Opening accounts)." } }
+    if (@("on", "elsewhere") -notcontains $setup.Helper) { return @{ Code = "nohelper"; Why = "The helper isn't installed or isn't on in this Chrome profile (Settings > Chrome setup)." } }
+    if (-not (Test-HelperCanCloseTabs $setup.HelperVersion)) { return @{ Code = "oldhelper"; Why = "The helper in this Chrome profile is older than 2.2: on chrome://extensions, click its round reload arrow." } }
+    return @{ Code = ""; Why = "" }
 }
+function Get-TabSkipReason([string]$closeWhen, $setup) { (Get-TabSkip $closeWhen $setup).Why }
 
 function Read-TabRequest([string]$head) {
     # The helper's question -> @{ Op; Version }, or $null for anything else.
@@ -1660,14 +1661,15 @@ $BkLogSchema = @{
     "launch.start"      = @{ Level = "info";  Fields = [ordered]@{ account = "alias"; main = "bool"; link = "enum:game|private|profile|share|other"; helper = "bool" } }
     "launch.window"     = @{ Level = "info";  Fields = [ordered]@{ account = "alias"; waitSec = "int" } }
     "launch.timeout"    = @{ Level = "warn";  Fields = [ordered]@{ account = "alias"; main = "bool"; waitSec = "int" } }
-    "launch.cancel"     = @{ Level = "info";  Fields = [ordered]@{ pending = "int" } }
+    "launch.cancel"     = @{ Level = "info";  Fields = [ordered]@{ pending = "int"; why = "enum:user|chrome" } }
     "launch.late"       = @{ Level = "info";  Fields = [ordered]@{ account = "alias"; waitSec = "int" } }
-    "roblox.disconnect" = @{ Level = "warn";  Fields = [ordered]@{ account = "alias"; code = "int"; reason = "enum:kicked|unexpected|elsewhere|lost|idle|connect|shutdown|closed|other"; autoRejoin = "bool" } }
+    "roblox.disconnect" = @{ Level = "warn";  Fields = [ordered]@{ account = "alias"; code = "int"; reason = "enum:kicked|unexpected|elsewhere|lost|idle|connect|shutdown|closed|other"; source = "enum:log|dialog|window"; autoRejoin = "bool" } }
     "roblox.trayclosed" = @{ Level = "info";  Fields = [ordered]@{ count = "int" } }
-    "tab.report"        = @{ Level = "info";  Fields = [ordered]@{ outcome = "enum:closed|kept|notasked"; reason = "enum:window|connected|off|cancelled|nowindow|closed|timeout|nolog|left|nohelper|oldhelper|noport|unknown|other" } }
+    "tab.report"        = @{ Level = "info";  Fields = [ordered]@{ outcome = "enum:closed|kept|notasked"; reason = "enum:window|connected|off|cancelled|nowindow|closed|timeout|nolog|left|nohelper|oldhelper|noport|nocontact|unknown|other" } }
     "update.check"      = @{ Level = "info";  Fields = [ordered]@{ result = "enum:latest|available|failed"; current = "version"; newest = "version"; errorType = "name" } }
     "update.start"      = @{ Level = "info";  Fields = [ordered]@{ from = "version"; to = "version" } }
     "multiwindow"       = @{ Level = "info";  Fields = [ordered]@{ state = "enum:on|off" } }
+    "backup.import"     = @{ Level = "info";  Fields = [ordered]@{ result = "enum:restart|unreadable|nocopy|notsaved"; accounts = "int" } }
     "log.dropped"       = @{ Level = "warn";  Fields = [ordered]@{ count = "int"; rejected = "int" } }
 }
 $BkLogRank = @{ info = 0; warn = 1; error = 2 }
@@ -2189,6 +2191,100 @@ function Write-AfkDiagEvents($log, $events) {
     foreach ($e in @($events)) { try { if ($e -is [System.Collections.IDictionary] -and $e.Ev) { Write-BkLog $log ("" + $e.Ev) $e.Fields } } catch { } }
 }
 
+# ----- screens, launches, disconnects, Roblox's tray, tabs, updates, import, multi-window -----
+# Logged where the app already knows the outcome, through Write-BkDiag (memory only). Names, links,
+# titles and messages never go in: an account is its alias, a link its kind, a disconnect its
+# code and category. None of these can throw.
+function New-BkDiag([int]$max = 200) {
+    # Max: how many of each of these events one run may log (a window that keeps coming and going
+    # can't push everything else out of the log); past that they're counted as dropped.
+    # Multi: the multi-window state logged last.
+    @{ Max = $max; Used = @{}; Multi = $null }
+}
+function Test-BkDiagBudget($diag, $log, [string]$ev) {
+    try {
+        if (-not $diag) { return $true }
+        $n = [int]$diag.Used[$ev] + 1; $diag.Used[$ev] = $n
+        if ($n -le $diag.Max) { return $true }
+        if ($log) { $log.Dropped++; $log.DropsToReport++ }
+        return $false
+    } catch { return $false }
+}
+function Get-BkAccountAlias($log, $acc) {
+    # An account in the log: its per-run alias, from its id. $null when there's none (left out).
+    try { if ($log -and $acc -and ("" + $acc.id)) { return Get-BkLogAlias $log ("" + $acc.id) } } catch { }
+    return $null
+}
+function Get-BkSeconds($since) {
+    # Whole seconds from $since until now ($null when it isn't a time).
+    try { if ($since -is [DateTime]) { return [int][Math]::Max(0, ([DateTime]::Now - $since).TotalSeconds) } } catch { }
+    return $null
+}
+function Get-BkLinkKind([string]$url) {
+    # What kind of link a launch used: game | private | profile | share | other (never the link).
+    try { $k = (Get-LinkInfo $url).Kind; if (@("game", "private", "profile", "share") -ccontains $k) { return $k } } catch { }
+    return "other"
+}
+function Get-DisconnectReason([string]$code, [bool]$kicked) {
+    # Roblox's disconnect code -> a category. A game's kick message makes it "kicked".
+    if ($kicked) { return "kicked" }
+    switch ("" + $code) {
+        "267" { return "kicked" }; "268" { return "unexpected" }; "273" { return "elsewhere" }; "277" { return "lost" }
+        "278" { return "idle" }; "279" { return "connect" }; "288" { return "shutdown" }
+    }
+    return "other"
+}
+function Get-ScreenFields($log, $w, $acc, $procId, [DateTime]$now) {
+    # A screen for screen.add / screen.remove: its number, window handle and process id, whose it
+    # is (alias, main), and how long since it was added or last given to an account.
+    $f = @{}
+    try {
+        if (-not $w) { return $f }
+        $f.screen = [int]$w.Num; $f.hwnd = [long]$w.Handle.ToInt64()
+        if ($procId) { $f.pid = [int]$procId }
+        if ($w.Since -is [DateTime]) { $f.uptimeSec = [int][Math]::Max(0, ($now - $w.Since).TotalSeconds) }
+        $al = Get-BkAccountAlias $log $acc
+        if ($al) { $f.account = $al; $f.main = [bool]$acc.isMain }
+    } catch { }
+    return $f
+}
+function Get-DisconnectFields($log, $acc, [string]$source, $sess, [bool]$auto) {
+    # roblox.disconnect: whose, Roblox's code and its category, and how it was found out:
+    # log (Roblox's own log), dialog (a box that looks like Roblox's 'Disconnected' one), or
+    # window (its window closed: kicked, crashed or closed, which can't be told apart).
+    $f = @{ source = $source; autoRejoin = $auto }
+    try {
+        $al = Get-BkAccountAlias $log $acc
+        if ($al) { $f.account = $al }
+        if ($source -eq "window") { $f.reason = "closed" }
+        elseif ($source -eq "log" -and $sess) {
+            $c = "" + $sess.Code
+            if ($c -match '^\d{1,4}$') { $f.code = [int]$c }
+            $f.reason = Get-DisconnectReason $c ([bool]("" + $sess.KickMsg))
+        } else { $f.reason = "other" }
+    } catch { }
+    return $f
+}
+function Get-UpdateErrorType($task) {
+    # Why an update check failed, as a code name: the error's type, the HTTP status, a timeout, or
+    # no version in the answer. Never the error's message.
+    try {
+        if (-not $task) { return "no-answer" }
+        if ($task.IsFaulted) { $e = $task.Exception; while ($e -and $e.InnerException) { $e = $e.InnerException }; if ($e) { return $e.GetType().FullName } }
+        if ($task.IsCanceled) { return "timed-out" }   # HttpClient's time limit
+        if ($task.Result -and -not $task.Result.IsSuccessStatusCode) { return "http-" + [int]$task.Result.StatusCode }
+        return "no-version"
+    } catch { return "unknown-error" }
+}
+function Get-MultiWindowEvent($diag, [bool]$on) {
+    # multiwindow the first time, then only when it turns on or off.
+    try {
+        $st = $(if ($on) { "on" } else { "off" })
+        if ($diag) { if ($diag.Multi -ceq $st) { return $null }; $diag.Multi = $st }
+        return @{ Ev = "multiwindow"; Fields = @{ state = $st } }
+    } catch { return $null }
+}
+
 if ($TestOnly) { return }
 
 # ------------------------------------------------------------------ setup --
@@ -2660,6 +2756,7 @@ function Get-RobloxCount { @(Get-Process -Name "RobloxPlayerBeta" -ErrorAction S
 $script:Wins = New-Object System.Collections.ArrayList   # one object per Roblox window
 $script:NextNum = 1
 $script:ExpectedClose = New-Object System.Collections.Generic.HashSet[long]
+$script:ReplacedClose = New-Object System.Collections.Generic.HashSet[long]   # for the log only: closed for the same account's new window
 $script:AccStatus = @{}           # nick -> @{ State = "failed"|"disc"; Time = "14:05" }
 $script:RejoinLog = @{}           # nick -> list of times (to stop rejoin loops)
 $script:SessionDirty = $false
@@ -2704,6 +2801,7 @@ function Step-BkLog([switch]$Final) {
     try {
         Invoke-BkErrorSweep $script:BkErrors $script:BkLog $Error
         Write-AfkDiagEvents $script:BkLog @(Get-AfkStateEvent $script:AfkDiag (Get-AfkStateFields $script:AfkOn $script:State))
+        if (-not $NoRoblox) { $mw = Get-MultiWindowEvent $script:BkDiag ($script:Locks.Count -gt 0); if ($mw) { Write-BkDiag $mw.Ev $mw.Fields } }   # wherever the locks were taken
         if ($Final) {
             Write-BkErrorSummary $script:BkErrors $script:BkLog
             Write-BkLog $script:BkLog "app.stop" @{ reason = $script:ExitReason; uptimeSec = [int]$script:BkLogClock.Elapsed.TotalSeconds; dropped = [int]$script:BkLog.Dropped }
@@ -2712,6 +2810,25 @@ function Step-BkLog([switch]$Final) {
         }
         Flush-BkLog $script:BkLog
         if ($script:BkLog.Off -and -not $script:BkLogNoticeShown) { $script:BkLogNoticeShown = $true; Say $script:BkLog.Notice }   # once, in words
+    } catch { }
+}
+function Write-BkDiag([string]$ev, $fields) {
+    # A screen, launch, disconnect, tray, tab, update, import or multi-window event: queued (memory
+    # only), within its per-run budget. Does nothing with logging off, and never throws.
+    if (-not $script:BkLog) { return }
+    try { if (Test-BkDiagBudget $script:BkDiag $script:BkLog $ev) { Write-BkLog $script:BkLog $ev $fields } } catch { }
+}
+function Write-ScreenDiag([string]$ev, $w, $claims = @()) {
+    # screen.add (claimed: a launch's window) or screen.remove (kind: replaced by the same account's
+    # new window, expected because BloxKit closed it, or closed). Call before ExpectedClose forgets it.
+    try {
+        $key = $w.Handle.ToInt64()
+        $replaced = ($ev -eq "screen.remove") -and $script:ReplacedClose.Remove($key)
+        if (-not $script:BkLog) { return }
+        $f = Get-ScreenFields $script:BkLog $w (Find-Account $w.Nick) ([RbxCore]::PidOf($w.Handle)) ([DateTime]::Now)
+        if ($ev -eq "screen.add") { [void]$f.Remove("uptimeSec"); $f.claimed = [bool]@($claims | Where-Object { $_.Op.Hwnd -eq $key }).Count }
+        else { [void]$f.Remove("main"); $f.kind = $(if ($replaced) { "replaced" } elseif ($script:ExpectedClose.Contains($key)) { "expected" } else { "closed" }) }
+        Write-BkDiag $ev $f
     } catch { }
 }
 function Start-BkLog {
@@ -2723,6 +2840,7 @@ function Start-BkLog {
         $script:BkErrors = New-BkErrorSweep $MaximumErrorCount
         $script:BkErrors.Seen = $(if ($Error.Count -gt 0) { $Error[0] } else { $null })   # only errors from here on are swept
         $script:BkLogChrome = @{ Dirs = $null; Names = @() }
+        $script:BkDiag = New-BkDiag
         $script:BkLog = $log
         Update-BkLogSecrets
         Write-BkLog $script:BkLog "app.start" @{
@@ -5165,6 +5283,7 @@ function Close-RobloxTray {
     if (@($script:Ops | Where-Object { -not $_.Hwnd -and -not $_.Cancelled -and ($now - $_.Start).TotalSeconds -lt ($script:State.launchTimeout + 30) }).Count) { return }
     $n = 0
     foreach ($id in (Get-RobloxTrayPids)) { try { Stop-Process -Id $id -Force -ErrorAction Stop; $n++ } catch {} }
+    if ($n) { Write-BkDiag "roblox.trayclosed" @{ count = $n } }
     if ($n -and -not $script:TrayNoted) {
         $script:TrayNoted = $true
         Say "Closed Roblox's tray icon (Roblox leaves it when its window closes). Settings > Look, sound, tray and files turns this off."
@@ -5577,17 +5696,19 @@ function Step-Queue {
             # (Roblox's page moves a private server's code behind it).
             $auto = $script:QCur.Acc.autoJoin -and @("on", "elsewhere", "unknown") -contains $setup.Helper
             $tabOp = ""
-            $skip = Get-TabSkipReason $script:State.tabCloseWhen $setup
-            if (-not $skip -and -not (Start-TabServer)) { $skip = "Windows didn't allow a local port for tab closing." }
+            $skipped = Get-TabSkip $script:State.tabCloseWhen $setup; $skip = $skipped.Why; $skipCode = $skipped.Code
+            if (-not $skip -and -not (Start-TabServer)) { $skip = "Windows didn't allow a local port for tab closing."; $skipCode = "noport" }
             $op | Add-Member -NotePropertyName TabAsked -NotePropertyValue 0 -Force
             if ($skip) {
                 # Tab closing is on, but can't work for this launch: say why (once per launch).
-                if ($script:State.tabCloseWhen -ne "off") { Set-TabReport $script:QCur.Acc.nick "won't close" $skip }
+                if ($script:State.tabCloseWhen -ne "off") { Set-TabReport $script:QCur.Acc.nick "won't close" $skip "kept" $skipCode }
             } else { $tabOp = $op.Id; $op.TabTracked = $true }
             # Remember which server this launch aims for (checked against the Roblox log once it joins).
             $script:Planned[$script:QCur.Acc.nick.ToLower()] = $(if ($auto -and ("" + $script:QCur.Job)) { "" + $script:QCur.Job } else { "" })
             $url = Add-Marker $script:QCur.Url $auto ("" + $script:QCur.Job) ("" + $script:QCur.Place) $tabOp $script:TabPort
-            if (-not (Open-Chrome $script:QCur.Acc $url)) { $script:Ops.Remove($op); Cancel-Queue; return }
+            if (-not (Open-Chrome $script:QCur.Acc $url)) { $script:Ops.Remove($op); Cancel-Queue -Why chrome; return }
+            # Chrome was asked to open it; whether Roblox opens is launch.window / launch.timeout / launch.late.
+            Write-BkDiag "launch.start" @{ account = (Get-BkAccountAlias $script:BkLog $script:QCur.Acc); main = [bool]$script:QCur.Acc.isMain; link = (Get-BkLinkKind $script:QCur.Url); helper = [bool]$auto }
             $script:QStart = $now; $script:QPhase = "wait"
             Update-Progress ("Opening {0} ({1} of {2})... waiting for its Roblox window" -f $script:QCur.Acc.nick, ($script:QDone + 1), $script:QTotal)
         }
@@ -5596,6 +5717,7 @@ function Step-Queue {
             if ($script:QCur.Op.Hwnd -ne 0) {
                 Set-AccStatus $script:QCur.Acc.nick $null
                 $script:QLoaded++
+                Write-BkDiag "launch.window" @{ account = (Get-BkAccountAlias $script:BkLog $script:QCur.Acc); waitSec = (Get-BkSeconds $script:QStart) }   # its Roblox window was matched to it
                 $wait = $(if ($script:QCur.Kind -eq "main") { $script:State.mainSettle } else { $script:State.launchSettle })
                 $script:QUntil = $now.AddSeconds($wait); $script:QPhase = "settle"
                 Render-Accounts
@@ -5603,6 +5725,7 @@ function Step-Queue {
             }
             $left = [int]($script:State.launchTimeout - ($now - $script:QStart).TotalSeconds)
             if ($left -le 0) {
+                Write-BkDiag "launch.timeout" @{ account = (Get-BkAccountAlias $script:BkLog $script:QCur.Acc); main = [bool]$script:QCur.Acc.isMain; waitSec = (Get-BkSeconds $script:QStart) }
                 $script:QFailed.Add($script:QCur) | Out-Null
                 Set-AccStatus $script:QCur.Acc.nick "failed"
                 $script:QDone++
@@ -5670,7 +5793,9 @@ function Finish-Queue([switch]$Quiet) {
     Render-Accounts; Update-Buttons
 }
 
-function Cancel-Queue {
+function Cancel-Queue([string]$Why = "user") {
+    # -Why (user: Stop | chrome: Chrome couldn't be opened) is only for the log.
+    Write-BkDiag "launch.cancel" @{ pending = $script:Q.Count + $(if ($script:QCur) { 1 } else { 0 }); why = $Why }
     if ($script:QCur -and $script:QCur.Op) { $script:QCur.Op.Cancelled = $true }   # its tab stays open
     foreach ($it in @($script:Q)) { Set-AccStatus $it.Acc.nick $null }
     if ($script:QCur) { Set-AccStatus $script:QCur.Acc.nick $null }
@@ -5710,12 +5835,14 @@ $TabAnswer = {
     if ($op) { $op.TabAsked = [int]$op.TabAsked + 1 }
     if ($op -and $a -ne "wait" -and -not $op.TabDone) {
         $op.TabDone = $true; $op | Add-Member -NotePropertyName TabFinal -NotePropertyValue $a -Force   # the helper stops asking after any answer but "wait"
-        Set-TabReport $op.Acc.nick $(if ($a -eq "close") { "closed" } else { "kept open" }) $v.Why
+        Set-TabReport $op.Acc.nick $(if ($a -eq "close") { "closed" } else { "kept open" }) $v.Why $(if ($a -eq "close") { "closed" } else { "kept" }) $v.Code
     }
     return $a
 }
-function Set-TabReport([string]$nick, [string]$what, [string]$why) {
+function Set-TabReport([string]$nick, [string]$what, [string]$why, [string]$outcome, [string]$code) {
     # "Last launch tab" under the setting, and the footer: what happened to a launch's tab, and why.
+    # The log gets only the outcome (closed | kept | notasked) and the reason's code.
+    Write-BkDiag "tab.report" @{ outcome = $outcome; reason = $(if ($code) { $code } else { "other" }) }
     $t = "Last launch tab ($nick, $(Get-Date -Format 'HH:mm')): $what. $why"
     $ui.TabCloseLast.Text = $t
     $ui.TabCloseLast.Foreground = Brush $(if ($what -eq "closed") { "SuccessInk" } else { "WarningInk" })
@@ -5726,7 +5853,7 @@ $TabTimer.Add_Tick({
     foreach ($o in @($script:Ops | Where-Object { $_.TabTracked -and -not $_.TabDone -and -not $_.TabWarned -and [int]$_.TabAsked -eq 0 -and ([DateTime]::Now - $_.Start).TotalSeconds -ge 30 })) {
         # The page opened with a launch id 30 s ago, but the helper never asked about it.
         $o | Add-Member -NotePropertyName TabWarned -NotePropertyValue $true -Force
-        Set-TabReport $o.Acc.nick "not asked about yet" "The helper in Chrome hasn't contacted BloxKit. Check on chrome://extensions in that profile that 'BloxKit Auto-Join Helper' 2.2 is on and shows no errors; if it is, something on this PC blocks Chrome from reaching 127.0.0.1."
+        Set-TabReport $o.Acc.nick "not asked about yet" "The helper in Chrome hasn't contacted BloxKit. Check on chrome://extensions in that profile that 'BloxKit Auto-Join Helper' 2.2 is on and shows no errors; if it is, something on this PC blocks Chrome from reaching 127.0.0.1." "notasked" "nocontact"
     }
     $waiting = @($script:Ops | Where-Object { $_.TabTracked -and -not $_.TabDone -and ([DateTime]::Now - $_.Start).TotalMinutes -lt 16 })
     if ($waiting.Count -eq 0) { $TabTimer.Stop() }   # nothing to answer; the port stays open for later launches
@@ -5734,7 +5861,8 @@ $TabTimer.Add_Tick({
 
 # ======================================================= ALERTS / REJOIN ==
 $script:AlertNick = $null
-function Raise-Alert([string]$nick, [string]$kind = "closed", [string]$detail = "") {
+function Raise-Alert([string]$nick, [string]$kind = "closed", [string]$detail = "", $sess = $null) {
+    # $sess: the window's session when Roblox's own log said so (for the log's code and category).
     $acc = Find-Account $nick
     $time = Get-Date -Format "HH:mm"
     if ($kind -eq "disc" -and $detail) {
@@ -5757,6 +5885,7 @@ function Raise-Alert([string]$nick, [string]$kind = "closed", [string]$detail = 
             $msg += " Auto-rejoin paused (3 tries in 10 minutes)."
         }
     }
+    Write-BkDiag "roblox.disconnect" (Get-DisconnectFields $script:BkLog $acc $(if ($kind -ne "disc") { "window" } elseif ($sess) { "log" } else { "dialog" }) $sess $auto)
     if ($auto) { $msg += " Rejoining automatically..." }
     $ui.AlertText.Text = [string][char]0x26A0 + "  " + $msg
     $ui.AlertRejoinBtn.Visibility = $(if ($acc -and -not $auto) { "Visible" } else { "Collapsed" })
@@ -5811,11 +5940,12 @@ function Refresh-Windows {
             $script:Wins.Remove($w); $changed = $true
             if ($w.Nick) { Add-Uptime $w.Nick $w.Since }
             $key = $w.Handle.ToInt64()
+            Write-ScreenDiag "screen.remove" $w   # (its alert, if any, comes after)
             if ($script:ExpectedClose.Contains($key)) { [void]$script:ExpectedClose.Remove($key) }
             elseif ($w.Nick) { Raise-Alert $w.Nick }
         }
     }
-    $claim = @()
+    $claim = @(); $added = @()
     foreach ($h in $handles) {
         $key = $h.ToInt64()
         if (@($script:Wins | Where-Object { $_.Handle.ToInt64() -eq $key }).Count) { continue }
@@ -5842,7 +5972,7 @@ function Refresh-Windows {
             $n = 1; while (@($script:Wins | Where-Object { $_.Num -eq $n }).Count) { $n++ }
             $obj.Num = $n
         }
-        $script:Wins.Add($obj) | Out-Null
+        $script:Wins.Add($obj) | Out-Null; $added += $obj
         if ($obj.Muted) { [RbxCore]::SetProcessMute([RbxCore]::PidOf($h), $true) | Out-Null }
         if (-not $obj.Nick -and $started) {
             # Which launch opened it? (a window opened some other way stays unnamed)
@@ -5859,6 +5989,7 @@ function Refresh-Windows {
         Build-Wall; Render-Accounts
         Apply-Efficiency
     }
+    foreach ($o in $added) { Write-ScreenDiag "screen.add" $o $claim }   # numbered and named by now
 }
 
 function Claim-Window([IntPtr]$h, $op) {
@@ -5871,6 +6002,7 @@ function Claim-Window([IntPtr]$h, $op) {
     if (-not ($script:QCur -and (Same $script:QCur.Op $op))) {
         # A window from a launch that had already given up: it did load after all.
         Set-AccStatus $acc.nick $null
+        Write-BkDiag "launch.late" @{ account = (Get-BkAccountAlias $script:BkLog $acc); waitSec = (Get-BkSeconds $op.Start) }
         foreach ($f in @($script:QFailed)) { if (Same $f.Op $op) { $script:QFailed.Remove($f) } }
         if ($script:QFailed.Count -eq 0) { $ui.RetryBtn.Visibility = "Collapsed" }
         Say "$($acc.nick)'s Roblox window showed up late. It's named now, so it won't be opened again."
@@ -6133,6 +6265,7 @@ function Close-ReplacedWindow($w, [string]$why) {
     # knock the new one out of its server).
     if (-not [RbxCore]::IsWindow($w.Handle)) { return }
     [void]$script:ExpectedClose.Add($w.Handle.ToInt64())
+    try { [void]$script:ReplacedClose.Add($w.Handle.ToInt64()) } catch { }   # for the log's screen.remove
     $w.DiscFlag = $false
     [RbxCore]::CloseWindow($w.Handle)
     Say "Closed the old window $(Label-Of $w): $why."
@@ -6587,6 +6720,7 @@ function Watch-Logs {
             if (-not $e) { continue }
             if ($e.Kind -eq "disc" -and $e.Code -eq "273") {
                 # This account joined a server from another window (or device): this one is done.
+                Write-BkDiag "roblox.disconnect" (Get-DisconnectFields $script:BkLog (Find-Account $w.Nick) "log" @{ Code = $e.Code } $false)
                 Close-ReplacedWindow $w "$(if ($w.Nick) { $w.Nick } else { 'that account' }) joined another server"
                 $changed = $true; break
             }
@@ -6616,7 +6750,7 @@ function Watch-Logs {
         # Wait a few seconds before alerting: a teleport also disconnects, then joins again.
         if ($w.Sess.State -eq "disconnected" -and -not $w.DiscFlag -and ($now - $w.Sess.ChangedAt).TotalSeconds -ge 8) {
             $w.DiscFlag = $true; $w.DiscText = $w.Sess.Reason; $changed = $true
-            if ($script:State.discCheck) { Raise-Alert $(if ($w.Nick) { $w.Nick } else { Label-Of $w }) "disc" $w.Sess.Reason }
+            if ($script:State.discCheck) { Raise-Alert $(if ($w.Nick) { $w.Nick } else { Label-Of $w }) "disc" $w.Sess.Reason $w.Sess }
         }
     }
     if ($changed) { Update-StatusTexts }
@@ -6748,7 +6882,7 @@ function Import-Backup {
     $dlg.Filter = "Backup file (*.json)|*.json"
     if (-not $dlg.ShowDialog($win)) { return }
     $r = Read-BackupFile $dlg.FileName $script:State $ChromeData (Get-ProfileNames)
-    if (-not $r.Ok) { [BkBox]::Show($r.Error, "Load backup", "OK", "Warning") | Out-Null; return }
+    if (-not $r.Ok) { Write-BkDiag "backup.import" @{ result = "unreadable" }; [BkBox]::Show($r.Error, "Load backup", "OK", "Warning") | Out-Null; return }   # (never its message: it can hold a path)
     $msg = "Load this backup with $(@($r.State.accounts).Count) account(s)?`n`nIt replaces your current accounts and settings. Your current ones are saved first as a copy in the settings folder. The app will restart."
     if (@($r.NeedSignIn).Count) {
         $msg += "`n`nThese accounts don't have their Chrome profile on this PC, so they'll need to sign in once: " + (@($r.NeedSignIn) -join ", ") + ".`nThe app will walk you through it after the restart."
@@ -6759,10 +6893,11 @@ function Import-Backup {
     if (Test-Path -LiteralPath $SettingsFile) {
         $keep = Join-Path $AppDir ("settings.before-import-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".json")
         try { Copy-Item -LiteralPath $SettingsFile $keep -ErrorAction Stop }
-        catch { [BkBox]::Show("Couldn't keep a copy of your current settings, so nothing was changed.`n`n$($_.Exception.Message)", "Load backup", "OK", "Warning") | Out-Null; return }
+        catch { Write-BkDiag "backup.import" @{ result = "nocopy" }; [BkBox]::Show("Couldn't keep a copy of your current settings, so nothing was changed.`n`n$($_.Exception.Message)", "Load backup", "OK", "Warning") | Out-Null; return }
     }
     $err = Write-SettingsFile $r.State $SettingsFile
-    if ($err) { [BkBox]::Show("Couldn't load the backup, nothing was changed.`n`n$err", "Load backup", "OK", "Warning") | Out-Null; return }
+    if ($err) { Write-BkDiag "backup.import" @{ result = "notsaved" }; [BkBox]::Show("Couldn't load the backup, nothing was changed.`n`n$err", "Load backup", "OK", "Warning") | Out-Null; return }
+    Write-BkDiag "backup.import" @{ result = "restart"; accounts = @($r.State.accounts).Count }
     $script:SkipSave = $true
     $script:ExitReason = "import"   # for the log's app.stop
     Release-Instance   # let the restarted copy start
@@ -7241,7 +7376,7 @@ function Start-UpdateCheck {
         $rq.Headers.Range = New-Object System.Net.Http.Headers.RangeHeaderValue(0, 4095)
         $script:UpdTask = $c.SendAsync($rq)
         $script:UpdState = "checking"
-    } catch { $script:UpdTask = $null; $script:UpdState = "failed" }
+    } catch { $script:UpdTask = $null; $script:UpdState = "failed"; Write-BkDiag "update.check" @{ result = "failed"; current = $BkVersion; errorType = $_.Exception.GetType().FullName } }
     Update-UpdateUi
 }
 function Read-UpdateCheck {
@@ -7257,6 +7392,8 @@ function Read-UpdateCheck {
         }
     } catch {}
     $manual = $script:UpdManual; $script:UpdManual = $false
+    if ($found) { Write-BkDiag "update.check" @{ result = $(if ($found -gt [version]$BkVersion) { "available" } else { "latest" }); current = $BkVersion; newest = "" + $found } }
+    else { Write-BkDiag "update.check" @{ result = "failed"; current = $BkVersion; errorType = (Get-UpdateErrorType $t) } }
     if (-not $found) {
         $script:UpdState = "failed"; Update-UpdateUi
         if ($manual) { Say "Couldn't reach GitHub to check for updates. Try again later." }
@@ -7297,6 +7434,7 @@ function Start-Update {
     Copy-Item -LiteralPath $upd $tmp -Force
     Start-Process powershell -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$tmp`" -AppDir `"$PSScriptRoot`" -WaitPid $PID -Restart -Quiet"
     Say "Updating BloxKit... it opens again in a few seconds."
+    Write-BkDiag "update.start" @{ from = $BkVersion; to = "" + $script:UpdNewest }   # the updater's own outcome is in update.log
     $script:ExitReason = "update"   # for the log's app.stop
     Release-Instance   # so the updated copy can start
     $script:ReallyExit = $true
