@@ -843,7 +843,7 @@ public static class BkBox { public static string Answer = "Yes"; public static s
 namespace Microsoft.Win32 { public class OpenFileDialog { public static bool Pick = true; public string Filter = ""; public string FileName = "backup.json"; public bool? ShowDialog(object owner) { return Pick; } } }
 '@
     $names2d = @("Write-BkDiag", "Write-ScreenDiag", "Refresh-Windows", "Claim-Window", "Raise-Alert", "Find-Account", "Same", "Close-ReplacedWindow", "Close-RobloxTray",
-                 "Step-Queue", "Cancel-Queue", "Set-TabReport", "Check-Disconnects", "Watch-Logs", "Read-UpdateCheck", "Start-UpdateCheck", "Start-Update", "Import-Backup", "Step-BkLog", "Label-Of")
+                 "Step-Queue", "Cancel-Queue", "Stop-QueueForTrayCrash", "Set-TabReport", "Check-Disconnects", "Watch-Logs", "Read-UpdateCheck", "Start-UpdateCheck", "Start-Update", "Import-Backup", "Step-BkLog", "Label-Of")
     $nodes2d = @(foreach ($n in $names2d) { $ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq $n }, $true) })
     $missing2d = @($names2d | Where-Object { $n = $_; -not @($nodes2d | Where-Object { $_ -and $_.Name -eq $n }).Count })
     Check "2d hook check: all $($names2d.Count) hooked functions are in BloxKit.ps1" ($missing2d.Count -eq 0) ("missing: " + ($missing2d -join ", "))
@@ -859,7 +859,13 @@ namespace Microsoft.Win32 { public class OpenFileDialog { public static bool Pic
         $script:SessionRestore = @{}; $script:RejoinLog = @{}; $script:Planned = @{}; $script:LastServer = @{}; $script:ProcStarts = @{}
         $script:QBusy = $false; $script:QCur = $null; $script:QPhase = "idle"; $script:QDone = 0; $script:QTotal = 0; $script:QLoaded = 0; $script:TabPort = 0; $script:Playing = [IntPtr]::Zero
         $script:Locks = @(); $script:AfkDiag = New-AfkDiag; $script:AfkOn = $false; $script:BkErrors = New-BkErrorSweep; $script:BkLogClock = [Diagnostics.Stopwatch]::StartNew()
-        $script:ChromeOk = $true; $script:TabServerOk = $true; $script:TrayPids = @(); $script:LogFeed = @{}; $script:WinClosed = $false; $script:CopyFails = $false; $script:WriteErr = ""; $script:BackupRead = $null
+        $script:RobloxCount = $null; $script:Stopped = New-Object System.Collections.ArrayList; $script:LogFiles = @(); $script:LogLists = 0; $script:QCrashLook = [DateTime]::MinValue
+        # Roblox's log folder: List(dir) -> files, Read(path, maxBytes) -> text; files are @{ Name; Created; Text }
+        $script:RobloxLogPort = @{
+            List = { param($d) $script:LogLists++; foreach ($f in @($script:LogFiles)) { [pscustomobject]@{ Name = $f.Name; FullName = "$d\$($f.Name)"; CreationTime = $f.Created; Length = [long]$f.Text.Length } } }
+            Read = { param($p, $max) (@($script:LogFiles | Where-Object { $p.EndsWith("\" + $_.Name) })[0]).Text }
+        }
+        $script:ChromeOk = $true; $script:TabServerOk = $true; $script:TrayPids = @(); $script:LogFeed = @{};$script:WinClosed = $false; $script:CopyFails = $false; $script:WriteErr = ""; $script:BackupRead = $null
         $script:NoRoblox = $false; $NoRoblox = $false; $BkVersion = "1.3.0"; $script:UpdTask = $null; $script:UpdManual = $false; $script:UpdNewest = $null; $script:ExitReason = "exit"
         [RbxCore]::Windows.Clear(); [RbxCore]::Closed.Clear(); [RbxCore]::Score = -1; [RbxCore]::Foreground = [IntPtr]::Zero; [BkBox]::Answer = "Yes"; [Microsoft.Win32.OpenFileDialog]::Pick = $true
         $ui = @{}; foreach ($n in "RetryBtn", "AlertText", "AlertRejoinBtn", "AlertBar", "TabCloseLast", "ProgressBar", "ProgressText") { $ui[$n] = [pscustomobject]@{ Text = ""; Visibility = ""; Foreground = $null; Value = 0 } }
@@ -876,7 +882,8 @@ namespace Microsoft.Win32 { public class OpenFileDialog { public static bool Pic
         function Open-Chrome($acc, [string]$url) { $script:ChromeOk }
         function Finish-Queue([switch]$Quiet) { $script:QBusy = $false; $script:QPhase = "idle"; $script:QCur = $null }
         function Get-RobloxTrayPids { $script:TrayPids }
-        function Stop-Process { [CmdletBinding()] param($Id, [switch]$Force) if ($Id -lt 0) { throw "Access is denied" } }
+        function Get-RobloxCount { if ($null -ne $script:RobloxCount) { $script:RobloxCount } else { @($script:TrayPids).Count } }   # (unless a check says otherwise: only the tray copies run)
+        function Stop-Process { [CmdletBinding()] param($Id, [switch]$Force) if ($Id -lt 0) { throw "Access is denied" }; [void]$script:Stopped.Add($Id) }
         function Test-Path { [CmdletBinding()] param($Path, $LiteralPath) $true }
         function Copy-Item { [CmdletBinding()] param($LiteralPath, $Destination, [switch]$Force) if ($script:CopyFails) { throw "There is not enough space on the disk" } }
         function Start-Process { [CmdletBinding()] param($FilePath, $ArgumentList, $WindowStyle) }
@@ -995,6 +1002,48 @@ namespace Microsoft.Win32 { public class OpenFileDialog { public static bool Pic
     $order = @($r.Lines | Where-Object { $_.ev -like "launch.*" } | ForEach-Object { $_.ev })
     Check "2d launches: in the order they happened" (($order -join ",") -eq "launch.start,launch.window,launch.start,launch.timeout") ($order -join ",")
 
+    # -- a launch whose Roblox crashed on a closed tray copy's leftover record (seen in Roblox's log) --
+    $crashText = "2026-10-18T14:08:18.176Z,0.176000,8488,6,Warning [FLog::Output] NoReload Detector: WebPlay NoReload with Tray only!`n" +
+                 "2026-10-18T14:08:18.178Z,0.178000,8488,6 [LOGCHANNELS + 1] RBXCRASH: UnhandledException (class wil::ResultException B:\Client\WindowsClient\SingleInstanceGuard.cpp(131)) Invalid window handle.`n"
+    $r = & {
+        . $env2d
+        foreach ($a in $accAlt, $accMain) { [void]$script:Q.Add([pscustomobject]@{ Acc = $a; Url = "https://www.roblox.com/games/1818/x"; Kind = "normal" }) }
+        $script:QBusy = $true; $script:QTotal = 2
+        Step-Queue                                                       # the alt: launch.start, waiting for its window
+        $t = [DateTime]::Now; $op = $script:QCur.Op; $op.Start = $t.AddSeconds(-10); $script:QStart = $t.AddSeconds(-10)
+        $script:LogFiles = @(
+            @{ Name = "0.743.0.7431134_20261018T140700Z_Player_AAAAA_last.log"; Created = $t.AddSeconds(-60); Text = $crashText },               # an earlier launch's
+            @{ Name = "0.743.0.7431134_20261018T140818Z_Player_BBBBB_CrashHandler_last.log"; Created = $t.AddSeconds(-5); Text = $crashText })
+        Step-Queue; $before = @{ Phase = $script:QPhase; Busy = $script:QBusy; Lists = $script:LogLists }
+        Step-Queue; $lists = $script:LogLists                           # a queue step later (0.7 s): not looked again
+        $script:LogFiles += @{ Name = "0.743.0.7431134_20261018T140818Z_Player_CCCCC_last.log"; Created = $t.AddSeconds(-5); Text = $crashText }
+        $script:QCrashLook = [DateTime]::MinValue; Step-Queue
+        $after = @{ Busy = $script:QBusy; Left = $script:Q.Count; Failed = $script:QFailed.Count; Cancelled = $op.Cancelled; Said = ($script:Said -join " | ") }
+        $script:QCrashLook = [DateTime]::MinValue; Step-Queue; Step-Queue   # it has stopped: nothing more
+        # trying again without closing Roblox: the earlier crash log isn't the new launch's
+        [void]$script:Q.Add([pscustomobject]@{ Acc = $accMain; Url = "https://www.roblox.com/games/1818/x"; Kind = "normal" }); $script:QBusy = $true; $script:QTotal = 1
+        Step-Queue; $script:QCrashLook = [DateTime]::MinValue; Step-Queue
+        @{ Lines = @(Written); Raw = (Raw); Before = $before; Lists = $lists; After = $after; Retry = @{ Phase = $script:QPhase; Busy = $script:QBusy } }
+    }
+    [void]$raws.Add($r.Raw)
+    $st = @(Evs $r.Lines "launch.start"); $cr = @(Evs $r.Lines "launch.crashed")
+    Check "2d launch.crashed: an earlier launch's crash log and a CrashHandler log don't count: still waiting" ($r.Before.Phase -eq "wait" -and $r.Before.Busy -and $r.Before.Lists -eq 1) ($r.Before | ConvertTo-Json -Compress)
+    Check "2d launch.crashed: Roblox's logs are looked at every 2 seconds at most, not every queue step" ($r.Lists -eq 1) "listed $($r.Lists) times"
+    Check "2d launch.crashed: once, for that launch: alias, main, why, the wait" ($cr.Count -eq 1 -and $cr[0].account -cmatch '^acc-' -and $cr[0].account -eq $st[0].account -and $cr[0].main -eq $false -and $cr[0].why -eq "staletray" -and $cr[0].waitSec -ge 10) ($cr | ConvertTo-Json -Compress)
+    Check "2d launch.crashed: the launch fails at once and the rest of the queue isn't sent" ($r.After.Busy -eq $false -and $r.After.Left -eq 0 -and $r.After.Failed -eq 1 -and $r.After.Cancelled -eq $true) ($r.After | ConvertTo-Json -Compress)
+    Check "2d launch.crashed: says to close all Roblox, then try again" ($r.After.Said -match "close all Roblox" -and $r.After.Said -match "try again") $r.After.Said
+    $order = @($r.Lines | Where-Object { $_.ev -like "launch.*" } | ForEach-Object { $_.ev })
+    Check "2d launch.crashed: no timeout after it, the next account wasn't started; a retry is a new launch" (($order -join ",") -eq "launch.start,launch.crashed,launch.start" -and $r.Retry.Phase -eq "wait" -and $r.Retry.Busy) ($order -join ",")
+    Check "2d launch.crashed: nothing from Roblox's log (file name, crash text) goes in" ($r.Raw -notmatch '_Player_|RBXCRASH|Tray only|SingleInstance|fake\\logs') ""
+    $r = & {
+        . $env2d
+        $NoRoblox = $true
+        [void]$script:Q.Add([pscustomobject]@{ Acc = $accAlt; Url = "https://www.roblox.com/games/1818/x"; Kind = "normal" }); $script:QBusy = $true; $script:QTotal = 1
+        Step-Queue; $script:LogFiles = @(@{ Name = "0.743.0.7431134_20261018T140818Z_Player_DDDDD_last.log"; Created = [DateTime]::Now.AddMinutes(1); Text = $crashText }); Step-Queue
+        @{ Lines = @(Written); Lists = $script:LogLists; Busy = $script:QBusy }
+    }
+    Check "2d launch.crashed: test mode never looks at Roblox's logs" ($r.Lists -eq 0 -and @(Evs $r.Lines "launch.crashed").Count -eq 0 -and $r.Busy) "listed $($r.Lists)"
+
     $r = & {
         . $env2d
         [void]$script:Q.Add([pscustomobject]@{ Acc = $accMain; Url = "https://www.roblox.com/games/1818/x"; Kind = "main" }); [void]$script:Q.Add([pscustomobject]@{ Acc = $accAlt; Url = "https://www.roblox.com/games/1818/x"; Kind = "normal" })
@@ -1034,6 +1083,31 @@ namespace Microsoft.Win32 { public class OpenFileDialog { public static bool Pic
     }
     $tc = @(Evs $r.Lines "roblox.trayclosed")
     Check "2d roblox.trayclosed: how many were really closed (one refused), none when there were none or while accounts open" ($tc.Count -eq 1 -and $tc[0].count -eq 2 -and $r.Said -eq 1) ($tc | ConvertTo-Json -Compress)
+
+    # Closing a tray copy while other Roblox runs leaves Roblox's record of it behind, and every
+    # new launch crashes on it: only when the tray copies are all that's left of Roblox.
+    $r = & {
+        . $env2d
+        $script:TrayNoted = $false   # (the scenario above already said its note once)
+        function Try-Close([object[]]$tray, $count) { $script:Stopped.Clear(); $script:TrayPids = $tray; $script:RobloxCount = $count; Close-RobloxTray; @($script:Stopped) -join "," }
+        $res = [ordered]@{}
+        $res.OneOfFive = Try-Close @(11) 5; $res.TwoOfThree = Try-Close @(11, 12) 3
+        $res.TwoOfTwo = Try-Close @(11, 12) 2; $res.OneOfOne = Try-Close @(11) 1
+        $script:State.closeRobloxTray = $false; $res.SettingOff = Try-Close @(11) 1; $script:State.closeRobloxTray = $true
+        $script:QBusy = $true; $res.Busy = Try-Close @(11) 1; $script:QBusy = $false
+        $op = [pscustomobject]@{ Id = "w"; Acc = $accAlt; Url = "https://www.roblox.com/games/1818/x"; Start = [DateTime]::Now.AddSeconds(-5); Hwnd = [long]0; Cancelled = $false }; [void]$script:Ops.Add($op)
+        $res.Waiting = Try-Close @(11) 1
+        $op.Cancelled = $true; $res.Cancelled = Try-Close @(11) 1
+        $NoRoblox = $true; $res.TestMode = Try-Close @(11) 1; $NoRoblox = $false
+        @{ Res = $res; Lines = @(Written); Said = $script:Said.Count }
+    }
+    $x = $r.Res
+    Check "2d tray: with game clients still running, tray copies are left alone (1 of 5, 2 of 3 Roblox)" ($x.OneOfFive -eq "" -and $x.TwoOfThree -eq "") ($x | ConvertTo-Json -Compress)
+    Check "2d tray: tray copies that are all that's left of Roblox are closed (1 of 1, 2 of 2)" ($x.OneOfOne -eq "11" -and $x.TwoOfTwo -eq "11,12") ($x | ConvertTo-Json -Compress)
+    Check "2d tray: still never with the setting off, while accounts open, while a launch waits for its window, or in test mode" ($x.SettingOff -eq "" -and $x.Busy -eq "" -and $x.Waiting -eq "" -and $x.TestMode -eq "") ($x | ConvertTo-Json -Compress)
+    Check "2d tray: a cancelled launch doesn't hold it back (as before)" ($x.Cancelled -eq "11") ($x | ConvertTo-Json -Compress)
+    $tc = @(Evs $r.Lines "roblox.trayclosed")
+    Check "2d tray: roblox.trayclosed only for real closes (2, 1, 1), the note said once" ((($tc | ForEach-Object { $_.count }) -join ",") -eq "2,1,1" -and $r.Said -eq 1) ($tc | ConvertTo-Json -Compress)
 
     # -- update checks and updating --
     function New-Answer([bool]$ok, [int]$status, [string]$body) { [pscustomobject]@{ IsSuccessStatusCode = $ok; StatusCode = $status; Content = ([pscustomobject]@{ B = $body } | Add-Member -MemberType ScriptMethod -Name ReadAsStringAsync -Value { [pscustomobject]@{ Result = $this.B } } -PassThru) } }

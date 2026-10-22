@@ -975,6 +975,50 @@ function Select-LaunchForHandoff([DateTime]$winProcStart, [DateTime]$at, $ops, [
     return $best
 }
 
+# ------------------------------------------------------- Roblox's tray copy --
+# When a Roblox window closes, Roblox keeps a window-less copy in the tray and notes its window in
+# its own record of "the Roblox that's running"; the next web launch is handed to that window.
+# Force-closing the tray copy leaves the record pointing at a window that's gone. The record lasts
+# while any Roblox runs, and then every new launch crashes on it ~2 ms after starting (seen with
+# Roblox 0.743); once no Roblox is left, the record goes too.
+function Test-TrayCloseOk([int]$trayCount, [int]$robloxCount) {
+    # Close tray copies only while they're all that's left of Roblox (then the record goes with them).
+    return ($trayCount -gt 0 -and $robloxCount -le $trayCount)
+}
+function Test-StaleTrayCrash([string]$text) {
+    # One Roblox log: a launch handed to the tray copy's window, then Roblox crashed because that
+    # window was gone. Both, in that order; a log still being written isn't it (yet).
+    $tray = $text.IndexOf("NoReload Detector: WebPlay NoReload with Tray only!", [StringComparison]::Ordinal)
+    if ($tray -lt 0) { return $false }
+    $crash = $text.IndexOf("RBXCRASH:", $tray, [StringComparison]::Ordinal)
+    if ($crash -lt 0) { return $false }
+    return ($text.IndexOf("Invalid window handle", $crash, [StringComparison]::Ordinal) -ge 0)
+}
+function Find-StaleTrayCrash($port, [string]$dir, [DateTime]$since, $claimed, [int]$maxBytes = 8192) {
+    # The path of a Roblox log made since a launch started that shows that crash, or "". Skips
+    # CrashHandler logs, older logs, logs too big for a client that crashed at once, and logs of
+    # windows already on the wall. $port: List(dir) -> files, Read(path, maxBytes) -> text. Never throws.
+    try { $files = @(& $port.List $dir) } catch { return "" }
+    foreach ($f in $files) {
+        try {
+            if ($f.Name -match 'CrashHandler' -or $f.CreationTime -lt $since -or $f.Length -gt $maxBytes -or @($claimed) -contains $f.FullName) { continue }
+            if (Test-StaleTrayCrash (& $port.Read $f.FullName $maxBytes)) { return "" + $f.FullName }
+        } catch { }
+    }
+    return ""
+}
+function New-RobloxLogPort {
+    # Roblox's real log folder, for Find-StaleTrayCrash. Roblox keeps its log open while it runs.
+    @{
+        List = { param($d) $(if ([IO.Directory]::Exists($d)) { (New-Object IO.DirectoryInfo $d).GetFiles("*_Player_*_last.log") } else { @() }) }
+        Read = {
+            param($f, $max)
+            $s = New-Object IO.FileStream ($f, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+            try { $b = New-Object byte[] ([int][Math]::Min([long]$max, $s.Length)); $n = $s.Read($b, 0, $b.Length); [Text.Encoding]::UTF8.GetString($b, 0, $n) } finally { $s.Dispose() }
+        }
+    }
+}
+
 # --------------------------------------------------------------- schedule --
 # One schedule: groups in order, each for some minutes. Invoke-PlanEvent is the only thing
 # that changes a run; it returns what the app should do (open / close / log). Time is
@@ -1661,6 +1705,7 @@ $BkLogSchema = @{
     "launch.start"      = @{ Level = "info";  Fields = [ordered]@{ account = "alias"; main = "bool"; link = "enum:game|private|profile|share|other"; helper = "bool" } }
     "launch.window"     = @{ Level = "info";  Fields = [ordered]@{ account = "alias"; waitSec = "int" } }
     "launch.timeout"    = @{ Level = "warn";  Fields = [ordered]@{ account = "alias"; main = "bool"; waitSec = "int" } }
+    "launch.crashed"    = @{ Level = "warn";  Fields = [ordered]@{ account = "alias"; main = "bool"; why = "enum:staletray"; waitSec = "int" } }
     "launch.cancel"     = @{ Level = "info";  Fields = [ordered]@{ pending = "int"; why = "enum:user|chrome" } }
     "launch.late"       = @{ Level = "info";  Fields = [ordered]@{ account = "alias"; waitSec = "int" } }
     "roblox.disconnect" = @{ Level = "warn";  Fields = [ordered]@{ account = "alias"; code = "int"; reason = "enum:kicked|unexpected|elsewhere|lost|idle|connect|shutdown|closed|other"; source = "enum:log|dialog|window"; autoRejoin = "bool" } }
@@ -5421,12 +5466,15 @@ function Get-RobloxTrayPids([int]$minAgeSec = 15) {
 }
 function Close-RobloxTray {
     # Closes Roblox's tray copy: it holds memory, and counts as "Roblox running", so Roblox's
-    # graphics couldn't be set. Never while accounts are opening (a launch might be using it).
+    # graphics couldn't be set. Never while accounts are opening (a launch might be using it), and
+    # only once no other Roblox runs (see Test-TrayCloseOk: otherwise new launches crash).
     if ($NoRoblox -or -not $script:State.closeRobloxTray -or $script:QBusy) { return }
     $now = [DateTime]::Now
     if (@($script:Ops | Where-Object { -not $_.Hwnd -and -not $_.Cancelled -and ($now - $_.Start).TotalSeconds -lt ($script:State.launchTimeout + 30) }).Count) { return }
+    $ids = @(Get-RobloxTrayPids)
+    if (-not (Test-TrayCloseOk $ids.Count (Get-RobloxCount))) { return }   # counted after: a client that just started counts too
     $n = 0
-    foreach ($id in (Get-RobloxTrayPids)) { try { Stop-Process -Id $id -Force -ErrorAction Stop; $n++ } catch {} }
+    foreach ($id in $ids) { try { Stop-Process -Id $id -Force -ErrorAction Stop; $n++ } catch {} }
     if ($n) { Write-BkDiag "roblox.trayclosed" @{ count = $n } }
     if ($n -and -not $script:TrayNoted) {
         $script:TrayNoted = $true
@@ -5654,6 +5702,7 @@ $script:Q = New-Object System.Collections.ArrayList
 $script:QBusy = $false
 $script:QPhase = "idle"
 $script:QCur = $null
+$script:QCrashLook = [DateTime]::MinValue   # when the waiting launch last looked in Roblox's logs for a crash
 $script:Ops = New-Object System.Collections.ArrayList   # recent launches (last 30 min), to match new windows to them
 $script:QStart = [DateTime]::Now
 $script:QUntil = [DateTime]::Now
@@ -5851,9 +5900,9 @@ function Step-Queue {
             $script:Planned[$script:QCur.Acc.nick.ToLower()] = $(if ($auto -and ("" + $script:QCur.Job)) { "" + $script:QCur.Job } else { "" })
             $url = Add-Marker $script:QCur.Url $auto ("" + $script:QCur.Job) ("" + $script:QCur.Place) $tabOp $script:TabPort
             if (-not (Open-Chrome $script:QCur.Acc $url)) { $script:Ops.Remove($op); Cancel-Queue -Why chrome; return }
-            # Chrome was asked to open it; whether Roblox opens is launch.window / launch.timeout / launch.late.
+            # Chrome was asked to open it; whether Roblox opens is launch.window / launch.timeout / launch.late / launch.crashed.
             Write-BkDiag "launch.start" @{ account = (Get-BkAccountAlias $script:BkLog $script:QCur.Acc); main = [bool]$script:QCur.Acc.isMain; link = (Get-BkLinkKind $script:QCur.Url); helper = [bool]$auto }
-            $script:QStart = $now; $script:QPhase = "wait"
+            $script:QStart = $now; $script:QPhase = "wait"; $script:QCrashLook = [DateTime]::MinValue
             Update-Progress ("Opening {0} ({1} of {2})... waiting for its Roblox window" -f $script:QCur.Acc.nick, ($script:QDone + 1), $script:QTotal)
         }
         "wait" {
@@ -5866,6 +5915,12 @@ function Step-Queue {
                 $script:QUntil = $now.AddSeconds($wait); $script:QPhase = "settle"
                 Render-Accounts
                 return
+            }
+            if (-not $NoRoblox -and ($now - $script:QCrashLook).TotalSeconds -ge 2) {
+                # Roblox's own log shows when its new client crashed straight away on a closed tray copy.
+                $script:QCrashLook = $now
+                $claimed = @($script:Wins | Where-Object { $_.LogPath } | ForEach-Object { $_.LogPath })
+                if (Find-StaleTrayCrash $script:RobloxLogPort $RobloxLogDir $script:QCur.Op.Start $claimed) { Stop-QueueForTrayCrash; return }
             }
             $left = [int]($script:State.launchTimeout - ($now - $script:QStart).TotalSeconds)
             if ($left -le 0) {
@@ -5935,6 +5990,25 @@ function Finish-Queue([switch]$Quiet) {
     }
     $ui.RetryBtn.Visibility = $(if ($script:QFailed.Count -gt 0) { "Visible" } else { "Collapsed" })
     Render-Accounts; Update-Buttons
+}
+
+function Stop-QueueForTrayCrash {
+    # The waiting launch's Roblox crashed on a closed tray copy's leftover record (Test-StaleTrayCrash).
+    # Every launch after it would crash the same way until all Roblox is closed, so stop here.
+    $acc = $script:QCur.Acc
+    Write-BkDiag "launch.crashed" @{ account = (Get-BkAccountAlias $script:BkLog $acc); main = [bool]$acc.isMain; why = "staletray"; waitSec = (Get-BkSeconds $script:QStart) }
+    $script:QCur.Op.Cancelled = $true   # no window can come from it now; one that shows up isn't its
+    $script:QFailed.Add($script:QCur) | Out-Null
+    Set-AccStatus $acc.nick "failed"
+    $script:QDone++
+    foreach ($it in @($script:Q)) { Set-AccStatus $it.Acc.nick $null }
+    $fl = $script:QCur.PSObject.Properties["Followers"]
+    if ($fl) { foreach ($n in @($fl.Value)) { Set-AccStatus $n $null } }
+    $script:Q.Clear()
+    Finish-Queue -Quiet
+    $msg = "Roblox crashed while opening $($acc.nick), so the rest weren't sent. Roblox is stuck on a tray copy that was closed: close all Roblox (every Roblox window, and Roblox in the tray by the clock), then try again."
+    Update-Progress $msg
+    Say $msg
 }
 
 function Cancel-Queue([string]$Why = "user") {
@@ -6803,6 +6877,7 @@ function Check-Disconnects {
 # process id, but every line carries the id of the thread that wrote it, so a log belongs to
 # the window whose process owns those threads.
 $RobloxLogDir = Join-Path $env:LOCALAPPDATA "Roblox\logs"
+$script:RobloxLogPort = New-RobloxLogPort   # for spotting a launch that crashed (Find-StaleTrayCrash)
 $script:LastServer = @{}   # nick (lower case) -> @{ Place; Job }, kept after the window closes
 $LogLineRx = '^\d{4}-\d\d-\d\dT[\d:.]+Z,[\d.]+,([0-9a-f]+),'
 
